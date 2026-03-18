@@ -136,6 +136,7 @@ than as a general-purpose Python library.
 Its stable public interface is therefore:
 
 - `authorities`
+  - add authority entries directly from Wikidata IDs or URLs
   - enrich manuscript files and authority files
   - reconcile existing person authorities against Wikidata
   - regenerate existing authority entries
@@ -149,9 +150,38 @@ line is the main supported interface for downstream repositories.
 
 `authorities` is the main workflow command. It provides three subcommands:
 
+- `add`
 - `enrich`
 - `reconcile`
 - `regenerate`
+
+#### `authorities add`
+
+Add one or more authority entries directly from Wikidata IDs or URLs, without
+requiring a manuscript file to contain the corresponding `@ref` first.
+
+Examples:
+
+```bash
+uv run authorities add Q145
+uv run authorities add https://www.wikidata.org/entity/Q145
+uv run authorities add place:Q145
+uv run authorities add --as place Q145 Q21
+```
+
+If the entity type is obvious, the command will infer it. Where there is no TEI
+context and the type would otherwise be ambiguous, use either:
+
+- `--as person|place|org|work`
+- a typed spec such as `place:Q145`
+
+Useful options:
+
+- `--dry-run`: preview additions without writing authority files
+- `--report`: write a JSON report of planned or applied additions
+- `--person-min-id`, `--place-min-id`, `--org-min-id`, `--work-min-id`: control
+  the minimum local numeric identifiers to allocate
+  for newly created local keys
 
 #### `authorities enrich`
 

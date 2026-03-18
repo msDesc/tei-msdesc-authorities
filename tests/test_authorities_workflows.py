@@ -575,3 +575,81 @@ def test_run_enrich_aborts_on_duplicate_authority_identifiers(
         match="Duplicate external identifiers found in authority files",
     ):
         module.run_enrich(args, client)
+
+
+def test_run_add_creates_place_entry_from_wikidata_ref(
+    module, client, tmp_path: Path, capsys
+) -> None:
+    persons = tmp_path / "persons.xml"
+    places = tmp_path / "places.xml"
+    works = tmp_path / "works.xml"
+    report = tmp_path / "report.json"
+
+    persons.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listPerson type="local"></listPerson><listPerson type="VIAF"></listPerson></body></text></TEI>""",
+        encoding="utf-8",
+    )
+    places.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body>
+            <listPlace type="local"></listPlace>
+            <listPlace type="TGN">
+               <place xml:id="place_7008590" type="country">
+                  <placeName type="index">Earlier</placeName>
+               </place>
+               <place xml:id="place_7008592" type="country">
+                  <placeName type="index">Later</placeName>
+               </place>
+            </listPlace>
+            <listPlace type="geonames"></listPlace>
+            <listOrg type="local"></listOrg>
+            <listOrg type="VIAF"></listOrg>
+            </body></text></TEI>""",
+        encoding="utf-8",
+    )
+    works.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listBibl type="authors"></listBibl><listBibl type="anonymous"></listBibl></body></text></TEI>""",
+        encoding="utf-8",
+    )
+
+    client._entity_cache.update(
+        {
+            "Q145": {
+                "labels": {"en": {"value": "United Kingdom"}},
+                "claims": {
+                    "P31": [
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q6256"}}}}
+                    ],
+                    "P1667": [
+                        {"mainsnak": {"datavalue": {"value": "7008591"}}}
+                    ],
+                },
+            }
+        }
+    )
+
+    args = SimpleNamespace(
+        persons=persons,
+        places=places,
+        works=works,
+        no_fetch=False,
+        dry_run=False,
+        refs=["Q145"],
+        entity_type=None,
+        person_min_id=1,
+        place_min_id=1,
+        org_min_id=1,
+        work_min_id=1,
+        report=report,
+    )
+
+    assert module.run_add(args, client) == 0
+
+    updated_places = places.read_text(encoding="utf-8")
+    assert updated_places.index('xml:id="place_7008590"') < updated_places.index(
+        'xml:id="place_7008591"'
+    ) < updated_places.index('xml:id="place_7008592"')
+    assert "United Kingdom" in updated_places
+
+    output = capsys.readouterr().out
+    assert "added place_7008591 <- Q145 (place)" in output
+    assert report.exists()

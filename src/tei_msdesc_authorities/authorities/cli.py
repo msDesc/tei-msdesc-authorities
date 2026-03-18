@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .core import run_enrich, run_reconcile, run_regenerate
+from .core import run_add, run_enrich, run_reconcile, run_regenerate
 from .wikidata import WikidataClient
 
 
@@ -60,6 +60,36 @@ def build_parser() -> argparse.ArgumentParser:
         description="Manage TEI authority records for msDesc-based projects.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    add_parser = subparsers.add_parser(
+        "add",
+        help="Add authority entries directly from Wikidata IDs or URLs.",
+    )
+    add_common_authority_args(add_parser)
+    add_min_id_args(add_parser)
+    add_parser.add_argument(
+        "refs",
+        nargs="+",
+        help="One or more Wikidata QIDs/URLs, optionally prefixed with a type such as place:Q145.",
+    )
+    add_parser.add_argument(
+        "--as",
+        dest="entity_type",
+        choices=["person", "place", "org", "work"],
+        help="Force the entity type for all supplied refs.",
+    )
+    add_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview only; do not write authority files.",
+    )
+    add_parser.add_argument(
+        "--report",
+        type=Path,
+        default=Path("processing/authority_enrichment_report.json"),
+        help="Path for JSON report output.",
+    )
+    add_parser.set_defaults(handler=run_add)
 
     enrich_parser = subparsers.add_parser(
         "enrich",

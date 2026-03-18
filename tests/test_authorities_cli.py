@@ -27,6 +27,16 @@ def test_parse_args_accepts_reconcile_apply_report_flag(cli_module) -> None:
     assert args.report == Path("processing/authority_enrichment_report.json")
 
 
+def test_parse_args_accepts_add_with_forced_type(cli_module) -> None:
+    args = cli_module.parse_args(
+        ["add", "--as", "place", "Q145", "https://www.wikidata.org/entity/Q21"]
+    )
+
+    assert args.command == "add"
+    assert args.entity_type == "place"
+    assert args.refs == ["Q145", "https://www.wikidata.org/entity/Q21"]
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

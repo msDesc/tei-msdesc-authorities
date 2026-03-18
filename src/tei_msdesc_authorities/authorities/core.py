@@ -2449,6 +2449,79 @@ def route_entity(
     return AuthorityListSpec("listBibl", "anonymous", "bibl", "work")
 
 
+def infer_entity_type_from_entity(
+    qid: str, client: WikidataClient
+) -> EntityType | None:
+    """Infer an authority type from a Wikidata entity when no TEI context exists."""
+
+    entity = client.get_entity(qid)
+    if entity is None:
+        return None
+
+    type_qids = set(claim_entity_qids(entity, "P31"))
+    claims = entity.get("claims")
+    claim_keys = set(claims) if isinstance(claims, dict) else set()
+
+    if (
+        type_qids
+        & (SETTLEMENT_TYPE_QIDS | COUNTRY_TYPE_QIDS | REGION_TYPE_QIDS)
+        or {"P625", "P1566", "P1667"} & claim_keys
+    ):
+        return EntityType.PLACE
+    if (
+        type_qids & {"Q5"}
+        or {
+            "P21",
+            "P569",
+            "P570",
+            "P2031",
+            "P2032",
+            "P611",
+            "P69",
+            "P27",
+            "P551",
+            "P106",
+            "P735",
+            "P734",
+            "P511",
+        }
+        & claim_keys
+    ):
+        return EntityType.PERSON
+    if {"P50", "P1922", "P407"} & claim_keys:
+        return EntityType.WORK
+    if claim_keys:
+        return EntityType.ORG
+    return None
+
+
+def parse_add_ref_spec(
+    spec: str, *, forced_entity_type: EntityType | None = None
+) -> tuple[EntityType | None, str]:
+    """Parse one ``authorities add`` ref spec into an optional type and QID."""
+
+    raw = spec.strip()
+    if not raw:
+        raise ValueError("Empty ref supplied to add command")
+    entity_type = forced_entity_type
+    ref = raw
+    if ":" in raw:
+        maybe_type, maybe_ref = raw.split(":", 1)
+        maybe_entity = {
+            "person": EntityType.PERSON,
+            "place": EntityType.PLACE,
+            "org": EntityType.ORG,
+            "work": EntityType.WORK,
+        }.get(maybe_type.strip().lower())
+        if maybe_entity is not None:
+            entity_type = maybe_entity
+            ref = maybe_ref.strip()
+    qid = extract_qid(ref)
+    if qid is None:
+        raise ValueError(f"Could not parse a Wikidata QID from '{spec}'")
+    return entity_type, qid
+
+
 def assign_key_for_details(
     details: EntityDetails,
     entity_type: EntityType,
@@ -3204,5 +3277,280 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
         print(f"Applied manuscript updates in {changed_files} file(s)")
     else:
         print("Dry-run mode. No manuscript or authority files were modified.")
+    return 0
 
+
+def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
+    """Execute the ``authorities add`` workflow."""
+
+    repository = AuthorityRepository(
+        AuthorityPaths(
+            persons=args.persons, places=args.places, works=args.works
+        )
+    )
+    apply_changes = not getattr(args, "dry_run", False)
+
+    for path in [args.persons, args.places, args.works]:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing file: {path}")
+
+    ensure_unique_authority_identifiers([args.persons, args.places, args.works])
+
+    forced_entity_type = (
+        EntityType(args.entity_type)
+        if getattr(args, "entity_type", None)
+        else None
+    )
+    existing_maps: dict[EntityType, dict[str, str]] = {
+        EntityType.PERSON: repository.qid_map(EntityType.PERSON),
+        EntityType.PLACE: repository.qid_map(EntityType.PLACE),
+        EntityType.ORG: repository.qid_map(EntityType.ORG),
+        EntityType.WORK: repository.qid_map(EntityType.WORK),
+    }
+    person_display_map = repository.display_map(EntityType.PERSON)
+    place_display_map = repository.display_map(EntityType.PLACE)
+    org_display_map = repository.display_map(EntityType.ORG)
+    person_authority_records = read_person_authority_records(args.persons)
+    used_ids: dict[str, set[int]] = repository.used_ids()
+    min_ids = {
+        "person": args.person_min_id,
+        "place": args.place_min_id,
+        "org": args.org_min_id,
+        "work": args.work_min_id,
+    }
+
+    key_map: dict[tuple[EntityType, str], str] = {}
+    planned: dict[tuple[EntityType, str], PlannedEntry] = {}
+    planned_person_display_map: dict[str, str] = {}
+    planned_place_display_map: dict[str, str] = {}
+    planned_org_display_map: dict[str, str] = {}
+    requested_targets: list[tuple[EntityType, str, str]] = []
+    active_work_context: dict[str, str] = {}
+
+    for spec in args.refs:
+        spec_entity_type, qid = parse_add_ref_spec(
+            spec, forced_entity_type=forced_entity_type
+        )
+        entity_type = spec_entity_type or infer_entity_type_from_entity(
+            qid, client
+        )
+        if entity_type is None:
+            raise ValueError(
+                f"Could not infer an authority type for {qid}. Use --as or a typed spec such as place:{qid}."
+            )
+        fallback_text = preferred_label(client.get_entity(qid), qid).value
+        requested_targets.append((entity_type, qid, fallback_text))
+
+    def ensure_related_for_person(
+        entity_type: EntityType, qid: str, fallback_text: str
+    ) -> tuple[str, str]:
+        if entity_type not in {EntityType.PLACE, EntityType.ORG}:
+            raise ValueError(
+                f"Unsupported related entity type for person enrichment: {entity_type}"
+            )
+        equivalent_key = equivalent_local_key(entity_type, qid)
+        if equivalent_key is not None:
+            if entity_type == EntityType.PLACE:
+                label = (
+                    place_display_map.get(equivalent_key)
+                    or fallback_text
+                    or equivalent_key
+                )
+            else:
+                label = (
+                    org_display_map.get(equivalent_key)
+                    or fallback_text
+                    or equivalent_key
+                )
+            return equivalent_key, label
+        key = ensure_entry(entity_type, qid, fallback_text)
+        if entity_type == EntityType.PLACE:
+            label = (
+                place_display_map.get(key)
+                or planned_place_display_map.get(key)
+                or fallback_text
+                or key
+            )
+        else:
+            label = (
+                org_display_map.get(key)
+                or planned_org_display_map.get(key)
+                or fallback_text
+                or key
+            )
+        return key, label
+
+    def ensure_person_for_work(
+        author_qid: str | None,
+        preferred_key: str | None = None,
+        preferred_text: str | None = None,
+    ) -> tuple[str, str, str | None]:
+        if author_qid is None:
+            if not preferred_key:
+                raise ValueError(
+                    "preferred_key is required when no author_qid is supplied"
+                )
+            label = (
+                person_display_map.get(preferred_key)
+                or person_authority_records.get(
+                    preferred_key, PersonAuthorityRecord(preferred_key)
+                ).display_label
+                or preferred_text
+                or preferred_key
+            )
+            return preferred_key, label, None
+
+        existing_key = existing_maps[EntityType.PERSON].get(author_qid)
+        if existing_key:
+            label = (
+                person_display_map.get(existing_key)
+                or person_authority_records.get(
+                    existing_key, PersonAuthorityRecord(existing_key)
+                ).display_label
+                or preferred_label(
+                    client.get_entity(author_qid), author_qid
+                ).value
+            )
+            return existing_key, label, None
+
+        key = ensure_entry(EntityType.PERSON, author_qid, author_qid)
+        if key in person_display_map:
+            return key, person_display_map[key], None
+        if key in planned_person_display_map:
+            return key, planned_person_display_map[key], "Wikidata"
+        return (
+            key,
+            display_label_for_person(
+                build_person_details(author_qid, author_qid, client)
+            ),
+            "Wikidata",
+        )
+
+    def ensure_entry(
+        entity_type: EntityType, qid: str, fallback_text: str
+    ) -> str:
+        target = (entity_type, qid)
+        if target in key_map:
+            return key_map[target]
+
+        existing_key = existing_maps[entity_type].get(qid)
+        if existing_key:
+            key_map[target] = existing_key
+            return existing_key
+
+        if entity_type == EntityType.PERSON:
+            details = build_person_details(
+                qid, fallback_text or qid, client, ensure_related_for_person
+            )
+        elif entity_type == EntityType.PLACE:
+            details = build_place_details(qid, fallback_text or qid, client)
+        elif entity_type == EntityType.ORG:
+            details = build_org_details(qid, fallback_text or qid, client)
+        else:
+            active_work_context["qid"] = qid
+            active_work_context["title"] = fallback_text or qid
+            details = build_work_details(
+                qid, fallback_text or qid, client, ensure_person_for_work
+            )
+            active_work_context.clear()
+
+        list_spec = route_entity(details, entity_type)
+        new_key = assign_key_for_details(
+            details, entity_type, used_ids, min_ids
+        )
+
+        if entity_type == EntityType.PERSON:
+            snippet = build_person_snippet(new_key, details)
+            planned_person_display_map[new_key] = display_label_for_person(
+                details
+            )
+        elif entity_type == EntityType.PLACE:
+            snippet = build_place_snippet(new_key, details)
+            planned_place_display_map[new_key] = details.label
+        elif entity_type == EntityType.ORG:
+            snippet = build_org_snippet(new_key, details)
+            planned_org_display_map[new_key] = details.label
+        else:
+            snippet = build_work_snippet(new_key, details)
+
+        key_map[target] = new_key
+        planned[target] = PlannedEntry(
+            qid=qid,
+            key=new_key,
+            entity_type=entity_type,
+            label=display_label_for_person(details)
+            if entity_type == EntityType.PERSON
+            else details.label,
+            list_spec=list_spec,
+            external_ids=details.external_ids,
+            xml_snippet=snippet,
+        )
+        return new_key
+
+    for entity_type, qid, fallback_text in requested_targets:
+        ensure_entry(entity_type, qid, fallback_text)
+
+    entries_by_list: dict[tuple[str, str, str, str], list[PlannedEntry]] = {}
+    for (_, _), entry in sorted(planned.items()):
+        spec = entry.list_spec
+        entries_by_list.setdefault(
+            (spec.list_tag, spec.list_type, spec.child_tag, spec.prefix), []
+        ).append(entry)
+
+    if apply_changes:
+        for (
+            list_tag,
+            list_type,
+            child_tag,
+            prefix,
+        ), entries in entries_by_list.items():
+            repository.insert_entries(
+                list_tag, list_type, child_tag, prefix, entries
+            )
+
+    report = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": "add",
+        "apply": apply_changes,
+        "requested_refs": args.refs,
+        "new_entries": [
+            {
+                "entity_type": entry.entity_type,
+                "qid": entry.qid,
+                "key": entry.key,
+                "label": entry.label,
+                "list_type": entry.list_spec.list_type,
+                "external_ids": {
+                    "viaf": entry.external_ids.viaf,
+                    "geonames": entry.external_ids.geonames,
+                    "tgn": entry.external_ids.tgn,
+                },
+            }
+            for _, entry in sorted(
+                planned.items(), key=lambda x: (x[1].entity_type, x[1].key)
+            )
+        ],
+    }
+
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text(
+        json.dumps(report, indent=2, ensure_ascii=True), encoding="utf-8"
+    )
+
+    for _, entry in sorted(
+        planned.items(), key=lambda x: (x[1].entity_type, x[1].key)
+    ):
+        target_path = (
+            repository.paths.persons
+            if entry.entity_type == EntityType.PERSON
+            else repository.paths.places
+            if entry.entity_type in {EntityType.PLACE, EntityType.ORG}
+            else repository.paths.works
+        )
+        action = "added" if apply_changes else "planned"
+        print(
+            f"{target_path}: {action} {entry.key} <- {entry.qid} ({entry.entity_type})"
+        )
+
+    print(f"Report written: {args.report}")
     return 0
