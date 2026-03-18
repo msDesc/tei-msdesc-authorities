@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tei-msdesc-authorities"
+version = "0.1.0"
+description = "Authority management tools for TEI msDesc manuscript catalogues"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = ["lxml>=6.0.0"]
+authors = [{ name = "Andrew Dunning" }]
+keywords = ["tei", "msdesc", "authorities", "wikidata", "manuscripts"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Text Processing :: Markup :: XML",
+]
+
+[project.urls]
+Repository = "https://github.com/msDesc/tei-msdesc-authorities"
+Issues = "https://github.com/msDesc/tei-msdesc-authorities/issues"
+
+[project.scripts]
+authorities = "tei_msdesc_authorities.authorities.cli:main"
+authority-identifiers = "tei_msdesc_authorities.authorities.checker:main"
+
+[dependency-groups]
+dev = ["lxml-stubs>=0.5.1", "pytest>=8.4.0"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tei_msdesc_authorities = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
+addopts = ["--import-mode=importlib"]
