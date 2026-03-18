@@ -137,6 +137,14 @@ LOCAL_AUTHORITY_EQUIVALENTS: dict[tuple[str, str], str] = {
     # authority rather than creating near-duplicate historical variants.
     ("place", "Q179876"): "place_7002445",  # Kingdom of England -> England
     ("place", "Q330362"): "place_7002445",  # Commonwealth of England -> England
+    (
+        "place",
+        "Q161885",
+    ): "place_7008591",  # Kingdom of Great Britain -> United Kingdom
+    (
+        "place",
+        "Q174193",
+    ): "place_7008591",  # United Kingdom of Great Britain and Ireland -> United Kingdom
 }
 
 SEX_MAP = {
