@@ -2428,10 +2428,10 @@ def route_entity(
     details: EntityDetails, entity_type: EntityType
 ) -> AuthorityListSpec:
     if entity_type == "place":
-        if details.external_ids.geonames:
-            return AuthorityListSpec("listPlace", "geonames", "place", "place")
         if details.external_ids.tgn:
             return AuthorityListSpec("listPlace", "TGN", "place", "place")
+        if details.external_ids.geonames:
+            return AuthorityListSpec("listPlace", "geonames", "place", "place")
         return AuthorityListSpec("listPlace", "local", "place", "place")
 
     if entity_type == "person":
@@ -2534,7 +2534,7 @@ def assign_key_for_details(
     if entity_type in {EntityType.PERSON, EntityType.ORG}:
         explicit_id = details.external_ids.viaf
     elif entity_type == EntityType.PLACE:
-        explicit_id = details.external_ids.geonames or details.external_ids.tgn
+        explicit_id = details.external_ids.tgn or details.external_ids.geonames
 
     if explicit_id is not None:
         numeric_id = int(explicit_id)

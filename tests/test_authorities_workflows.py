@@ -619,6 +619,9 @@ def test_run_add_creates_place_entry_from_wikidata_ref(
                     "P31": [
                         {"mainsnak": {"datavalue": {"value": {"id": "Q6256"}}}}
                     ],
+                    "P1566": [
+                        {"mainsnak": {"datavalue": {"value": "2635167"}}}
+                    ],
                     "P1667": [
                         {"mainsnak": {"datavalue": {"value": "7008591"}}}
                     ],

@@ -183,6 +183,44 @@ def test_build_place_snippet_emits_type_and_rounded_geo(module) -> None:
     assert "<geo>38.5919,16.0789</geo>" in snippet
 
 
+def test_route_entity_prefers_tgn_over_geonames_for_places(module) -> None:
+    details = module.EntityDetails(
+        qid="Q145",
+        label="United Kingdom",
+        external_ids=module.ExternalAuthorityIds(
+            geonames="2635167",
+            tgn="7008591",
+        ),
+    )
+
+    route = module.route_entity(details, module.EntityType.PLACE)
+
+    assert route.list_tag == "listPlace"
+    assert route.list_type == "TGN"
+
+
+def test_assign_key_for_details_prefers_tgn_over_geonames_for_places(
+    module,
+) -> None:
+    details = module.EntityDetails(
+        qid="Q145",
+        label="United Kingdom",
+        external_ids=module.ExternalAuthorityIds(
+            geonames="2635167",
+            tgn="7008591",
+        ),
+    )
+
+    key = module.assign_key_for_details(
+        details,
+        module.EntityType.PLACE,
+        {"person": set(), "place": set(), "org": set(), "work": set()},
+        {"person": 1, "place": 1, "org": 1, "work": 1},
+    )
+
+    assert key == "place_7008591"
+
+
 def test_external_id_links_use_trusted_property_classes_only(
     module, client
 ) -> None:
