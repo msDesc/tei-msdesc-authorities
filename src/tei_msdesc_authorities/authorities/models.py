@@ -34,6 +34,7 @@ class Command(StrEnum):
 class ElementName(StrEnum):
     """Supported TEI element names that can carry unresolved external refs."""
 
+    AUTHOR = "author"
     PERS_NAME = "persName"
     PLACE_NAME = "placeName"
     COUNTRY = "country"
@@ -56,7 +57,8 @@ type EnsurePersonFn = Callable[
 ]
 
 XPATH_CANDIDATES = (
-    "//tei:persName[@ref and not(@key)]"
+    "//tei:author[@ref and not(@key)]"
+    " | //tei:persName[@ref and not(@key)]"
     " | //tei:placeName[@ref and not(@key)]"
     " | //tei:country[@ref and not(@key)]"
     " | //tei:orgName[@ref and not(@key)]"
@@ -174,6 +176,7 @@ def element_to_entity(local: str) -> EntityType | None:
     """Map a TEI local element name to the corresponding authority type."""
 
     return {
+        "author": EntityType.PERSON,
         "persName": EntityType.PERSON,
         "placeName": EntityType.PLACE,
         "country": EntityType.PLACE,

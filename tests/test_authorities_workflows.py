@@ -353,6 +353,70 @@ def test_run_enrich_applies_person_entry_and_manuscript_key_update(
     assert "Applied manuscript updates in 1 file(s)" in output
 
 
+def test_run_enrich_applies_author_ref_as_person_key_update(
+    module, client, tmp_path: Path, capsys
+) -> None:
+    persons = tmp_path / "persons.xml"
+    places = tmp_path / "places.xml"
+    works = tmp_path / "works.xml"
+    manuscript = tmp_path / "manuscript.xml"
+    report = tmp_path / "report.json"
+
+    persons.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listPerson type="local"></listPerson></body></text></TEI>""",
+        encoding="utf-8",
+    )
+    places.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listPlace type="local"></listPlace><listOrg type="local"></listOrg></body></text></TEI>""",
+        encoding="utf-8",
+    )
+    works.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listBibl type="authors"></listBibl><listBibl type="anonymous"></listBibl></body></text></TEI>""",
+        encoding="utf-8",
+    )
+    manuscript.write_text(
+        """<TEI xml:id="manuscript_1" xmlns="http://www.tei-c.org/ns/1.0"><text><body><msDesc><msContents><msItem><author ref="https://www.wikidata.org/wiki/Q316090">Valerius Flaccus</author></msItem></msContents></msDesc></body></text></TEI>""",
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(
+        command="enrich",
+        dry_run=False,
+        keep_ref=False,
+        inputs=[str(manuscript)],
+        persons=persons,
+        places=places,
+        works=works,
+        report=report,
+        no_fetch=True,
+        person_min_id=1,
+        place_min_id=1,
+        org_min_id=1,
+        work_min_id=1,
+    )
+
+    assert module.run_enrich(args, client) == 0
+
+    updated_persons = persons.read_text(encoding="utf-8")
+    updated_manuscript = manuscript.read_text(encoding="utf-8")
+    payload = module.json.loads(report.read_text(encoding="utf-8"))
+    output = capsys.readouterr().out
+
+    assert 'xml:id="person_1"' in updated_persons
+    assert ">Valerius Flaccus</persName>" in updated_persons
+    assert "Q316090" in updated_persons
+    assert (
+        '<author key="person_1">Valerius Flaccus</author>'
+        in updated_manuscript
+    )
+    assert 'ref="https://www.wikidata.org/wiki/Q316090"' not in updated_manuscript
+    assert payload["candidate_count"] == 1
+    assert payload["new_entries"][0]["key"] == "person_1"
+    assert payload["manuscript_updates"][0]["element"] == "author"
+    assert payload["manuscript_updates"][0]["assigned_key"] == "person_1"
+    assert "Applied manuscript updates in 1 file(s)" in output
+
+
 def test_run_enrich_dry_run_leaves_files_unchanged_but_writes_report(
     module, client, tmp_path: Path, capsys
 ) -> None:
