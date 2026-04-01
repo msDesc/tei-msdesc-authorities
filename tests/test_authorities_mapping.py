@@ -12,7 +12,7 @@ from tei_msdesc_authorities.authorities import dimev as DIMEV_MODULE
     [
         (
             {
-                "source_id": "Q1",
+                "source_identifier": "Q1",
                 "label": "Price, Gregory",
                 "birth": "1535-08-06",
                 "death": "1600-03-19",
@@ -21,7 +21,7 @@ from tei_msdesc_authorities.authorities import dimev as DIMEV_MODULE
         ),
         (
             {
-                "source_id": "Q2",
+                "source_identifier": "Q2",
                 "label": "Carne, Sir Edward",
                 "display_subtype": "surnameFirst",
                 "honorific_prefix": "Sir",
@@ -36,6 +36,15 @@ from tei_msdesc_authorities.authorities import dimev as DIMEV_MODULE
 def test_display_label_for_person(
     module, details_kwargs: dict[str, object], expected: str
 ) -> None:
+    source_identifier = str(details_kwargs["source_identifier"])
+    details_kwargs = {
+        **{
+            key: value
+            for key, value in details_kwargs.items()
+            if key != "source_identifier"
+        },
+        "source": module.SourceRef("wikidata", source_identifier, "Wikidata"),
+    }
     details = module.EntityDetails(**details_kwargs)
     assert module.display_label_for_person(details) == expected
 
@@ -115,7 +124,7 @@ def test_build_person_details_reorders_honorific_surname_first_name(
 
 def test_build_person_snippet_sets_cert_for_approximate_dates(module) -> None:
     details = module.EntityDetails(
-        source_id="Q2",
+        source=module.SourceRef("wikidata", "Q2", "Wikidata"),
         label="Carne, Sir Edward",
         display_subtype="surnameFirst",
         birth="1496",
@@ -225,7 +234,7 @@ def test_build_place_details_rounds_coordinates_and_sets_country_type(
 
 def test_build_place_snippet_emits_type_and_rounded_geo(module) -> None:
     details = module.EntityDetails(
-        source_id="QPLACE",
+        source=module.SourceRef("wikidata", "QPLACE", "Wikidata"),
         label="Kingdom of Sicily",
         place_type="country",
         coordinates=module.CoordinatePoint(
@@ -241,11 +250,11 @@ def test_build_place_snippet_emits_type_and_rounded_geo(module) -> None:
 
 def test_route_entity_prefers_tgn_over_geonames_for_places(module) -> None:
     details = module.EntityDetails(
-        source_id="Q145",
+        source=module.SourceRef("wikidata", "Q145", "Wikidata"),
         label="United Kingdom",
-        external_ids=module.ExternalAuthorityIds(
-            geonames="2635167",
-            tgn="7008591",
+        external_identifiers=(
+            module.ExternalIdentifier("geonames", "2635167"),
+            module.ExternalIdentifier("tgn", "7008591"),
         ),
     )
 
@@ -259,11 +268,11 @@ def test_assign_key_for_details_prefers_tgn_over_geonames_for_places(
     module,
 ) -> None:
     details = module.EntityDetails(
-        source_id="Q145",
+        source=module.SourceRef("wikidata", "Q145", "Wikidata"),
         label="United Kingdom",
-        external_ids=module.ExternalAuthorityIds(
-            geonames="2635167",
-            tgn="7008591",
+        external_identifiers=(
+            module.ExternalIdentifier("geonames", "2635167"),
+            module.ExternalIdentifier("tgn", "7008591"),
         ),
     )
 
@@ -518,9 +527,8 @@ def test_dimev_client_reuses_on_disk_cache_between_runs(tmp_path: Path) -> None:
 
 def test_build_work_snippet_uses_dimev_source_name(module) -> None:
     details = module.EntityDetails(
-        source_id="DIMEV:2613",
+        source=module.SourceRef("dimev", "2613", "DIMEV"),
         label="In the name of the blessed Trinity",
-        source_name="DIMEV",
         source_ref="https://www.dimev.net/record.php?recID=2613",
         links=(
             module.LinkItem(
@@ -892,7 +900,7 @@ def test_build_person_snippet_sets_low_cert_for_non_year_floruit(
     module, floruit, expected: str
 ) -> None:
     details = module.EntityDetails(
-        source_id="Q3",
+        source=module.SourceRef("wikidata", "Q3", "Wikidata"),
         label="Example Person",
         floruit=floruit(module),
     )
@@ -998,7 +1006,7 @@ def test_build_person_snippet_emits_keyed_org_and_place_relations(
     module,
 ) -> None:
     details = module.EntityDetails(
-        source_id="QPERSON",
+        source=module.SourceRef("wikidata", "QPERSON", "Wikidata"),
         label="Example, John",
         affiliations=(
             module.LinkedAuthorityRef(

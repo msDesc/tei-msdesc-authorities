@@ -19,14 +19,14 @@ def test_insert_entries_in_numeric_order_handles_viaf_list(
         encoding="utf-8",
     )
     entry = module.PlannedEntry(
-        source_id="Q200",
+        source=module.SourceRef("wikidata", "Q200", "Wikidata"),
         key="person_200",
         entity_type="person",
         label="Inserted",
         list_spec=module.AuthorityListSpec(
             "listPerson", "VIAF", "person", "person"
         ),
-        external_ids=module.ExternalAuthorityIds(viaf="200"),
+        external_identifiers=(module.ExternalIdentifier("viaf", "200"),),
         xml_snippet='            <person xml:id="person_200">\n               <persName type="display">Inserted</persName>\n            </person>',
     )
 
@@ -58,14 +58,14 @@ def test_insert_entries_in_numeric_order_handles_tgn_list(
         encoding="utf-8",
     )
     entry = module.PlannedEntry(
-        source_id="Q200",
+        source=module.SourceRef("wikidata", "Q200", "Wikidata"),
         key="place_200",
         entity_type="place",
         label="Inserted",
         list_spec=module.AuthorityListSpec(
             "listPlace", "TGN", "place", "place"
         ),
-        external_ids=module.ExternalAuthorityIds(tgn="200"),
+        external_identifiers=(module.ExternalIdentifier("tgn", "200"),),
         xml_snippet='            <place xml:id="place_200">\n               <placeName type="index">Inserted</placeName>\n            </place>',
     )
 
@@ -97,14 +97,14 @@ def test_insert_entries_in_numeric_order_reindents_to_match_tgn_list(
         encoding="utf-8",
     )
     entry = module.PlannedEntry(
-        source_id="Q200",
+        source=module.SourceRef("wikidata", "Q200", "Wikidata"),
         key="place_200",
         entity_type="place",
         label="Inserted",
         list_spec=module.AuthorityListSpec(
             "listPlace", "TGN", "place", "place"
         ),
-        external_ids=module.ExternalAuthorityIds(tgn="200"),
+        external_identifiers=(module.ExternalIdentifier("tgn", "200"),),
         xml_snippet='            <place xml:id="place_200">\n               <placeName type="index">Inserted</placeName>\n            </place>',
     )
 
@@ -137,14 +137,14 @@ def test_insert_entries_in_numeric_order_ignores_commented_tgn_entries_for_inden
         encoding="utf-8",
     )
     entry = module.PlannedEntry(
-        source_id="Q200",
+        source=module.SourceRef("wikidata", "Q200", "Wikidata"),
         key="place_200",
         entity_type="place",
         label="Inserted",
         list_spec=module.AuthorityListSpec(
             "listPlace", "TGN", "place", "place"
         ),
-        external_ids=module.ExternalAuthorityIds(tgn="200"),
+        external_identifiers=(module.ExternalIdentifier("tgn", "200"),),
         xml_snippet='            <place xml:id="place_200">\n               <placeName type="index">Inserted</placeName>\n            </place>',
     )
 
@@ -177,12 +177,12 @@ def test_insert_entries_in_numeric_order_handles_irregular_local_org_list(
         encoding="utf-8",
     )
     entry = module.PlannedEntry(
-        source_id="Q381",
+        source=module.SourceRef("wikidata", "Q381", "Wikidata"),
         key="org_381",
         entity_type="org",
         label="Inserted",
         list_spec=module.AuthorityListSpec("listOrg", "local", "org", "org"),
-        external_ids=module.ExternalAuthorityIds(),
+        external_identifiers=(),
         xml_snippet='            <org xml:id="org_381">\n               <orgName type="display">Inserted</orgName>\n            </org>',
     )
 

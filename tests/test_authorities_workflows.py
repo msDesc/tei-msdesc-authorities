@@ -102,9 +102,9 @@ def test_main_regenerates_every_entry(
     qids = {key: f"Q{index}" for index, key in enumerate(requested, start=1)}
     calls: list[tuple[str, str]] = []
     state = module.RegenerationState(
-        existing_person_qid_map={},
-        existing_place_qid_map={},
-        existing_org_qid_map={},
+        existing_person_source_map={},
+        existing_place_source_map={},
+        existing_org_source_map={},
         person_display_map={},
         place_display_map={},
         org_display_map={},
@@ -141,8 +141,10 @@ def test_main_regenerates_every_entry(
     )
     monkeypatch.setattr(
         core_module,
-        "existing_entry_wikidata_qid",
-        lambda _path, key, _child_tag: qids[key],
+        "existing_entry_source_ref",
+        lambda _path, key, _child_tag: module.SourceRef(
+            "wikidata", qids[key], "Wikidata"
+        ),
     )
 
     def fake_load(**_kwargs: object) -> object:
@@ -157,9 +159,9 @@ def test_main_regenerates_every_entry(
     )
 
     def fake_regenerate_entry(
-        key: str, qid: str, **_kwargs: object
+        key: str, ref: object, **_kwargs: object
     ) -> tuple[Path, str, tuple[object, ...]]:
-        calls.append((key, qid))
+        calls.append((key, ref.display_id))
         assert _kwargs["regeneration_state"] is state
         return persons, "person", ()
 
@@ -208,17 +210,19 @@ def test_main_reports_created_related_entries_during_regeneration(
     )
     monkeypatch.setattr(
         core_module,
-        "existing_entry_wikidata_qid",
-        lambda _path, _key, _child_tag: "Q4816",
+        "existing_entry_source_ref",
+        lambda _path, _key, _child_tag: module.SourceRef(
+            "wikidata", "Q4816", "Wikidata"
+        ),
     )
     monkeypatch.setattr(
         core_module.RegenerationState,
         "load",
         classmethod(
             lambda cls, **_kwargs: module.RegenerationState(
-                existing_person_qid_map={},
-                existing_place_qid_map={},
-                existing_org_qid_map={},
+                existing_person_source_map={},
+                existing_place_source_map={},
+                existing_org_source_map={},
                 person_display_map={},
                 place_display_map={},
                 org_display_map={},
@@ -234,30 +238,30 @@ def test_main_reports_created_related_entries_during_regeneration(
     monkeypatch.setattr(
         core_module,
         "regenerate_entry",
-        lambda key, qid, **_kwargs: (
+        lambda key, ref, **_kwargs: (
             persons,
             "person",
             (
                 module.PlannedEntry(
-                    source_id="QORG",
+                    source=module.SourceRef("wikidata", "QORG", "Wikidata"),
                     key="org_123",
                     entity_type="org",
                     label="Cirencester Abbey",
                     list_spec=module.AuthorityListSpec(
                         "listOrg", "local", "org", "org"
                     ),
-                    external_ids=module.ExternalAuthorityIds(),
+                    external_identifiers=(),
                     xml_snippet="<org/>",
                 ),
                 module.PlannedEntry(
-                    source_id="QPLACE",
+                    source=module.SourceRef("wikidata", "QPLACE", "Wikidata"),
                     key="place_456",
                     entity_type="place",
                     label="England",
                     list_spec=module.AuthorityListSpec(
                         "listPlace", "local", "place", "place"
                     ),
-                    external_ids=module.ExternalAuthorityIds(),
+                    external_identifiers=(),
                     xml_snippet="<place/>",
                 ),
             ),

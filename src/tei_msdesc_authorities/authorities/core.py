@@ -58,13 +58,15 @@ from .models import (
     EntityDetails,
     EntityType,
     ExistingPersonEntry,
-    ExternalAuthorityIds,
+    ExternalIdentifier,
     FloruitRange,
     LinkedAuthorityRef,
     LinkItem,
     NameVariant,
     PersonAuthorityRecord,
     PlannedEntry,
+    SourceRef,
+    SourceTarget,
     WorkAuthor,
     element_to_entity,
     entity_to_prefix,
@@ -111,14 +113,14 @@ class AuthorityRepository:
 
     paths: AuthorityPaths
 
-    def qid_map(self, entity_type: EntityType) -> dict[str, str]:
-        """Return the existing local-key map for linked Wikidata QIDs."""
+    def source_map(self, entity_type: EntityType) -> dict[str, str]:
+        """Return the existing local-key map for supported external source refs."""
 
         if entity_type == EntityType.PERSON:
-            return read_existing_qid_map(self.paths.persons, entity_type)
+            return read_existing_source_map(self.paths.persons, entity_type)
         if entity_type in {EntityType.PLACE, EntityType.ORG}:
-            return read_existing_qid_map(self.paths.places, entity_type)
-        return read_existing_qid_map(self.paths.works, entity_type)
+            return read_existing_source_map(self.paths.places, entity_type)
+        return read_existing_source_map(self.paths.works, entity_type)
 
     def display_map(self, entity_type: EntityType) -> dict[str, str]:
         """Return the local display-label map for an authority entity type."""
@@ -184,9 +186,9 @@ class RegenerationState:
     rebuild QID maps, display-label maps, and numeric ID allocation state.
     """
 
-    existing_person_qid_map: dict[str, str]
-    existing_place_qid_map: dict[str, str]
-    existing_org_qid_map: dict[str, str]
+    existing_person_source_map: dict[str, str]
+    existing_place_source_map: dict[str, str]
+    existing_org_source_map: dict[str, str]
     person_display_map: dict[str, str]
     place_display_map: dict[str, str]
     org_display_map: dict[str, str]
@@ -218,9 +220,9 @@ class RegenerationState:
                 )
             )
         return cls(
-            existing_person_qid_map=repository.qid_map(EntityType.PERSON),
-            existing_place_qid_map=repository.qid_map(EntityType.PLACE),
-            existing_org_qid_map=repository.qid_map(EntityType.ORG),
+            existing_person_source_map=repository.source_map(EntityType.PERSON),
+            existing_place_source_map=repository.source_map(EntityType.PLACE),
+            existing_org_source_map=repository.source_map(EntityType.ORG),
             person_display_map=repository.display_map(EntityType.PERSON),
             place_display_map=repository.display_map(EntityType.PLACE),
             org_display_map=repository.display_map(EntityType.ORG),
@@ -228,16 +230,16 @@ class RegenerationState:
         )
 
     def record_entry(
-        self, entity_type: EntityType, qid: str, key: str, label: str
+        self, entity_type: EntityType, ref: SourceRef, key: str, label: str
     ) -> None:
         if entity_type == EntityType.PERSON:
-            self.existing_person_qid_map[qid] = key
+            self.existing_person_source_map[ref.lookup_key] = key
             self.person_display_map[key] = label
         elif entity_type == EntityType.PLACE:
-            self.existing_place_qid_map[qid] = key
+            self.existing_place_source_map[ref.lookup_key] = key
             self.place_display_map[key] = label
         elif entity_type == EntityType.ORG:
-            self.existing_org_qid_map[qid] = key
+            self.existing_org_source_map[ref.lookup_key] = key
             self.org_display_map[key] = label
 
 
@@ -326,23 +328,42 @@ def extract_qid(ref: str) -> str | None:
     return None
 
 
-@dataclass(slots=True, frozen=True)
-class AddRefTarget:
-    """A normalized external source reference supplied to ``authorities add``."""
+def source_ref(source: str, identifier: str) -> SourceRef:
+    """Build a normalized source ref with the project's preferred display name."""
 
-    entity_type: EntityType | None
-    source: str
-    identifier: str
+    source_name = {"wikidata": "Wikidata", "dimev": "DIMEV"}.get(source)
+    return SourceRef(source=source, identifier=identifier, source_name=source_name)
 
-    @property
-    def lookup_key(self) -> str:
-        return f"{self.source}:{self.identifier}"
 
-    @property
-    def display_id(self) -> str:
-        if self.source == "wikidata":
-            return self.identifier
-        return f"DIMEV:{self.identifier}"
+def parse_supported_source_ref(ref: str) -> SourceRef | None:
+    """Parse one supported external ref into a normalized source ref."""
+
+    qid = extract_qid(ref)
+    if qid is not None:
+        return source_ref("wikidata", qid)
+    dimev_id = extract_dimev_id(ref)
+    if dimev_id is not None:
+        return source_ref("dimev", dimev_id)
+    return None
+
+
+def external_identifier_value(
+    identifiers: tuple[ExternalIdentifier, ...], authority: str
+) -> str | None:
+    """Return the first identifier value for the requested authority key."""
+
+    for identifier in identifiers:
+        if identifier.authority == authority:
+            return identifier.value
+    return None
+
+
+def external_identifier_map(
+    identifiers: tuple[ExternalIdentifier, ...],
+) -> dict[str, str]:
+    """Return external identifiers keyed by authority name for reporting."""
+
+    return {identifier.authority: identifier.value for identifier in identifiers}
 
 
 def collect_candidates(xml_paths: list[Path]) -> list[Candidate]:
@@ -362,8 +383,8 @@ def collect_candidates(xml_paths: list[Path]) -> list[Candidate]:
                 continue
 
             ref = (node.get("ref") or "").strip()
-            qid = extract_qid(ref)
-            if not qid:
+            parsed_ref = parse_supported_source_ref(ref)
+            if parsed_ref is None:
                 continue
 
             text = normalize_element_text(node)
@@ -389,7 +410,7 @@ def collect_candidates(xml_paths: list[Path]) -> list[Candidate]:
                     element_name=element_name,
                     entity_type=entity_type,
                     ref=ref,
-                    source_id=qid,
+                    source=parsed_ref,
                     text=text,
                     context_author_key=context_author_key,
                     context_author_text=context_author_text,
@@ -398,45 +419,11 @@ def collect_candidates(xml_paths: list[Path]) -> list[Candidate]:
     return candidates
 
 
-def read_existing_qid_map(
-    authority_path: Path, entity_type: EntityType
-) -> dict[str, str]:
-    """Map linked Wikidata QIDs to existing local authority keys."""
-
-    tree = parse_xml(authority_path)
-    if entity_type == EntityType.PERSON:
-        entries = xpath_elements(tree, "//tei:person[@xml:id]")
-    elif entity_type == EntityType.WORK:
-        entries = xpath_elements(tree, "//tei:bibl[@xml:id]")
-    elif entity_type == EntityType.PLACE:
-        entries = xpath_elements(tree, "//tei:place[@xml:id]")
-    else:
-        entries = xpath_elements(tree, "//tei:org[@xml:id]")
-
-    mapping: dict[str, str] = {}
-    for node in entries:
-        xml_id = node.get(f"{{{NS['xml']}}}id")
-        if not xml_id:
-            continue
-        for target in xpath_strings(
-            node, './/tei:note[@type="links"]//tei:ref/@target'
-        ):
-            qid = extract_qid(target)
-            if qid:
-                mapping[qid] = xml_id
-    return mapping
-
-
 def extract_supported_target_id(target: str) -> str | None:
     """Normalize supported external targets for add-time reuse checks."""
 
-    qid = extract_qid(target)
-    if qid is not None:
-        return f"wikidata:{qid}"
-    dimev_id = extract_dimev_id(target)
-    if dimev_id is not None:
-        return f"dimev:{dimev_id}"
-    return None
+    parsed_ref = parse_supported_source_ref(target)
+    return parsed_ref.lookup_key if parsed_ref is not None else None
 
 
 def read_existing_source_map(
@@ -853,9 +840,9 @@ def reconcile_existing_persons(
                     "approved": False,
                     "reasons": reasons,
                     "matched_by_query": search_query,
-                    "external_ids": {
-                        "viaf": details.external_ids.viaf,
-                    },
+                    "external_ids": external_identifier_map(
+                        details.external_identifiers
+                    ),
                 }
                 existing_candidate = candidates_by_qid.get(qid)
                 candidate_score = cast(float, candidate["score"])
@@ -1033,23 +1020,23 @@ def apply_approved_person_reconciliations(
     return changed
 
 
-def parse_regenerate_spec(spec: str) -> tuple[str, str | None]:
+def parse_regenerate_spec(spec: str) -> tuple[str, SourceRef | None]:
     spec = spec.strip()
     if "=" not in spec:
         if not spec:
             raise ValueError(
-                "Invalid regenerate spec ''; expected KEY or KEY=QID/URL"
+                "Invalid regenerate spec ''; expected KEY or KEY=source ref"
             )
         return spec, None
     key, ref = spec.split("=", 1)
     key = key.strip()
     ref = ref.strip()
-    qid = extract_qid(ref)
-    if not key or not qid:
+    parsed_ref = parse_supported_source_ref(ref)
+    if not key or parsed_ref is None:
         raise ValueError(
-            f"Invalid regenerate spec '{spec}'; could not parse key and Wikidata QID"
+            f"Invalid regenerate spec '{spec}'; could not parse key and supported source ref"
         )
-    return key, qid
+    return key, parsed_ref
 
 
 def authority_file_for_key(
@@ -1094,9 +1081,9 @@ def existing_entry_fallback_text(
     return key
 
 
-def existing_entry_wikidata_qid(
+def existing_entry_source_ref(
     authority_path: Path, key: str, child_tag: str
-) -> str | None:
+) -> SourceRef | None:
     tree = parse_xml(authority_path)
     entries = xpath_elements(tree, f"//tei:{child_tag}[@xml:id=$key]", key=key)
     if not entries:
@@ -1105,9 +1092,9 @@ def existing_entry_wikidata_qid(
     for target in xpath_strings(
         node, './/tei:note[@type="links"]//tei:ref/@target'
     ):
-        qid = extract_qid(target)
-        if qid:
-            return qid
+        parsed_ref = parse_supported_source_ref(target)
+        if parsed_ref is not None:
+            return parsed_ref
     return None
 
 
@@ -1135,7 +1122,7 @@ def replace_authority_entry_in_place(
 
 def regenerate_entry(
     key: str,
-    qid: str,
+    entry_source: SourceRef | str,
     *,
     persons_path: Path,
     places_path: Path,
@@ -1152,19 +1139,25 @@ def regenerate_entry(
     )
     authority_path, entity_type, child_tag = repository.paths.for_key(key)
     fallback_text = existing_entry_fallback_text(authority_path, key, child_tag)
-    if client.get_entity(qid) is None:
-        reason = (
-            client.last_error or "failed to fetch live Wikidata entity data"
-        )
+    if isinstance(entry_source, str):
+        entry_source = source_ref("wikidata", entry_source)
+    if entry_source.source == "wikidata" and client.get_entity(
+        entry_source.identifier
+    ) is None:
+        reason = client.last_error or "failed to fetch live source data"
         raise ValueError(
-            f"Cannot regenerate {key} from {qid}: {reason}. "
+            f"Cannot regenerate {key} from {entry_source.display_id}: {reason}. "
             "No changes were written."
+        )
+    if entry_source.source != "wikidata":
+        raise ValueError(
+            f"Cannot regenerate {key} from {entry_source.display_id}: regeneration is not yet supported for source '{entry_source.source}'."
         )
 
     state = regeneration_state or RegenerationState.load(repository=repository)
-    existing_person_qid_map = state.existing_person_qid_map
-    existing_place_qid_map = state.existing_place_qid_map
-    existing_org_qid_map = state.existing_org_qid_map
+    existing_person_source_map = state.existing_person_source_map
+    existing_place_source_map = state.existing_place_source_map
+    existing_org_source_map = state.existing_org_source_map
     person_display_map = state.person_display_map
     place_display_map = state.place_display_map
     org_display_map = state.org_display_map
@@ -1188,7 +1181,9 @@ def regenerate_entry(
                 ),
                 None,
             )
-        existing_key = existing_person_qid_map.get(author_qid)
+        existing_key = existing_person_source_map.get(
+            source_ref("wikidata", author_qid).lookup_key
+        )
         if existing_key:
             return (
                 existing_key,
@@ -1196,7 +1191,7 @@ def regenerate_entry(
                 None,
             )
         raise ValueError(
-            f"Cannot regenerate work entry from {qid}: author {author_qid} is not present in persons.xml"
+            f"Cannot regenerate work entry from {entry_source.display_id}: author {author_qid} is not present in persons.xml"
         )
 
     def ensure_related_for_person(
@@ -1213,13 +1208,17 @@ def regenerate_entry(
                     equivalent_key, fallback_label
                 )
         if entity_type == "place":
-            existing_key = existing_place_qid_map.get(related_qid)
+            existing_key = existing_place_source_map.get(
+                source_ref("wikidata", related_qid).lookup_key
+            )
             if existing_key:
                 return existing_key, place_display_map.get(
                     existing_key, fallback_label
                 )
         elif entity_type == "org":
-            existing_key = existing_org_qid_map.get(related_qid)
+            existing_key = existing_org_source_map.get(
+                source_ref("wikidata", related_qid).lookup_key
+            )
             if existing_key:
                 return existing_key, org_display_map.get(
                     existing_key, fallback_label
@@ -1255,32 +1254,32 @@ def regenerate_entry(
         )
         list_spec = route_entity(details, entity_type)
         planned_related[target] = PlannedEntry(
-            source_id=related_qid,
+            source=source_ref("wikidata", related_qid),
             key=new_key,
             entity_type=entity_type,
             label=details.label,
             list_spec=list_spec,
-            external_ids=details.external_ids,
+            external_identifiers=details.external_identifiers,
             xml_snippet=snippet,
         )
         planned_label_map[new_key] = details.label
         return new_key, details.label
 
+    details = build_details_for_target(
+        SourceTarget(entity_type=entity_type, ref=entry_source),
+        entity_type,
+        fallback_text,
+        wikidata_client=client,
+        ensure_related_for_person=ensure_related_for_person,
+        ensure_person_for_work=ensure_person_for_work,
+    )
     if entity_type == "person":
-        details = build_person_details(
-            qid, fallback_text, client, ensure_related_for_person
-        )
         snippet = build_person_snippet(key, details)
     elif entity_type == "place":
-        details = build_place_details(qid, fallback_text, client)
         snippet = build_place_snippet(key, details)
     elif entity_type == "org":
-        details = build_org_details(qid, fallback_text, client)
         snippet = build_org_snippet(key, details)
     else:
-        details = build_work_details(
-            qid, fallback_text, client, ensure_person_for_work
-        )
         snippet = build_work_snippet(key, details)
 
     if planned_related:
@@ -1303,11 +1302,11 @@ def regenerate_entry(
             )
         for (_, _), entry in sorted(planned_related.items()):
             state.record_entry(
-                entry.entity_type, entry.source_id, entry.key, entry.label
+                entry.entity_type, entry.source, entry.key, entry.label
             )
 
     repository.replace_entry(key, child_tag, snippet)
-    state.record_entry(entity_type, qid, key, details.label)
+    state.record_entry(entity_type, entry_source, key, details.label)
     created_related = tuple(
         entry for (_, _), entry in sorted(planned_related.items())
     )
@@ -2260,7 +2259,7 @@ def build_person_details(
         ),
     ]
     return EntityDetails(
-        source_id=qid,
+        source=source_ref("wikidata", qid),
         label=normalized_label,
         label_lang=display.lang,
         display_subtype=display_subtype,
@@ -2284,8 +2283,12 @@ def build_person_details(
         ),
         occupations=collect_occupation_variants(entity, client),
         links=dedupe_links((*generic_links, *curated_links)),
-        external_ids=ExternalAuthorityIds(
-            viaf=first_numeric_identifier(entity, "P214")
+        external_identifiers=tuple(
+            ExternalIdentifier(authority, value)
+            for authority, value in (
+                ("viaf", first_numeric_identifier(entity, "P214")),
+            )
+            if value is not None
         ),
     )
 
@@ -2298,7 +2301,7 @@ def build_place_details(
     coordinates = claim_coordinates(entity)
     curated_pids = {pid for pid, _, _ in PLACE_ID_LINKS}
     return EntityDetails(
-        source_id=qid,
+        source=source_ref("wikidata", qid),
         label=display.value,
         label_lang=display.lang,
         variants=collect_variants(entity, display),
@@ -2310,9 +2313,13 @@ def build_place_details(
         ),
         coordinates=coordinates,
         place_type=place_type_from_entity(entity),
-        external_ids=ExternalAuthorityIds(
-            geonames=first_numeric_identifier(entity, "P1566"),
-            tgn=first_numeric_identifier(entity, "P1667"),
+        external_identifiers=tuple(
+            ExternalIdentifier(authority, value)
+            for authority, value in (
+                ("geonames", first_numeric_identifier(entity, "P1566")),
+                ("tgn", first_numeric_identifier(entity, "P1667")),
+            )
+            if value is not None
         ),
     )
 
@@ -2324,7 +2331,7 @@ def build_org_details(
     display = preferred_label(entity, fallback)
     curated_pids = {pid for pid, _, _ in PERSON_ID_LINKS}
     return EntityDetails(
-        source_id=qid,
+        source=source_ref("wikidata", qid),
         label=display.value,
         label_lang=display.lang,
         variants=collect_variants(entity, display),
@@ -2334,8 +2341,12 @@ def build_org_details(
                 *build_link_items(entity, qid, PERSON_ID_LINKS),
             )
         ),
-        external_ids=ExternalAuthorityIds(
-            viaf=first_numeric_identifier(entity, "P214")
+        external_identifiers=tuple(
+            ExternalIdentifier(authority, value)
+            for authority, value in (
+                ("viaf", first_numeric_identifier(entity, "P214")),
+            )
+            if value is not None
         ),
     )
 
@@ -2383,7 +2394,7 @@ def build_work_details(
     incipit = first_monolingual_text(entity, "P1922")
 
     return EntityDetails(
-        source_id=qid,
+        source=source_ref("wikidata", qid),
         label=display.value,
         label_lang=display.lang,
         variants=collect_variants(entity, display),
@@ -2402,8 +2413,12 @@ def build_work_details(
         incipit=incipit[0] if incipit else None,
         incipit_lang=incipit[1] if incipit else None,
         authors=tuple(authors),
-        external_ids=ExternalAuthorityIds(
-            viaf=first_numeric_identifier(entity, "P214")
+        external_identifiers=tuple(
+            ExternalIdentifier(authority, value)
+            for authority, value in (
+                ("viaf", first_numeric_identifier(entity, "P214")),
+            )
+            if value is not None
         ),
     )
 
@@ -2460,9 +2475,8 @@ def build_dimev_work_details(
             )
 
     return EntityDetails(
-        source_id=f"DIMEV:{record.record_id}",
+        source=source_ref("dimev", record.record_id),
         label=record.title,
-        source_name="DIMEV",
         source_ref=record.record_url,
         label_lang="enm",
         variants=tuple(NameVariant(value) for value in record.title_variants),
@@ -2636,19 +2650,19 @@ def route_entity(
     details: EntityDetails, entity_type: EntityType
 ) -> AuthorityListSpec:
     if entity_type == "place":
-        if details.external_ids.tgn:
+        if external_identifier_value(details.external_identifiers, "tgn"):
             return AuthorityListSpec("listPlace", "TGN", "place", "place")
-        if details.external_ids.geonames:
+        if external_identifier_value(details.external_identifiers, "geonames"):
             return AuthorityListSpec("listPlace", "geonames", "place", "place")
         return AuthorityListSpec("listPlace", "local", "place", "place")
 
     if entity_type == "person":
-        if details.external_ids.viaf:
+        if external_identifier_value(details.external_identifiers, "viaf"):
             return AuthorityListSpec("listPerson", "VIAF", "person", "person")
         return AuthorityListSpec("listPerson", "local", "person", "person")
 
     if entity_type == "org":
-        if details.external_ids.viaf:
+        if external_identifier_value(details.external_identifiers, "viaf"):
             return AuthorityListSpec("listOrg", "VIAF", "org", "org")
         return AuthorityListSpec("listOrg", "local", "org", "org")
 
@@ -2705,7 +2719,7 @@ def infer_entity_type_from_entity(
 
 def parse_add_ref_spec(
     spec: str, *, forced_entity_type: EntityType | None = None
-) -> AddRefTarget:
+) -> SourceTarget:
     """Parse one ``authorities add`` ref spec into an optional type and source ID."""
 
     raw = spec.strip()
@@ -2730,29 +2744,113 @@ def parse_add_ref_spec(
             raise ValueError(f"Could not parse a DIMEV record ID from '{spec}'")
         if entity_type not in {None, EntityType.WORK}:
             raise ValueError("DIMEV refs can only be used for work entries")
-        return AddRefTarget(
+        return SourceTarget(
             entity_type=EntityType.WORK,
-            source="dimev",
-            identifier=identifier,
+            ref=source_ref("dimev", identifier),
         )
     dimev_id = extract_dimev_id(ref)
     if dimev_id is not None:
         if entity_type not in {None, EntityType.WORK}:
             raise ValueError("DIMEV refs can only be used for work entries")
-        return AddRefTarget(
+        return SourceTarget(
             entity_type=EntityType.WORK,
-            source="dimev",
-            identifier=dimev_id,
+            ref=source_ref("dimev", dimev_id),
         )
     qid = extract_qid(ref)
     if qid is None:
         raise ValueError(
             f"Could not parse a supported source ref from '{spec}'"
         )
-    return AddRefTarget(
+    return SourceTarget(
         entity_type=entity_type,
-        source="wikidata",
-        identifier=qid,
+        ref=source_ref("wikidata", qid),
+    )
+
+
+def infer_entity_type_for_target(
+    target: SourceTarget, client: WikidataClient
+) -> EntityType | None:
+    """Infer an entity type for a parsed source target."""
+
+    if target.entity_type is not None:
+        return target.entity_type
+    if target.source == "dimev":
+        return EntityType.WORK
+    if target.source == "wikidata":
+        return infer_entity_type_from_entity(target.identifier, client)
+    return None
+
+
+def fallback_text_for_target(
+    target: SourceTarget, client: WikidataClient
+) -> str:
+    """Return a best-effort fallback label for a source target."""
+
+    if target.source == "wikidata":
+        return preferred_label(
+            client.get_entity(target.identifier), target.identifier
+        ).value
+    return target.display_id
+
+
+def build_details_for_target(
+    target: SourceTarget,
+    entity_type: EntityType,
+    fallback_text: str,
+    *,
+    wikidata_client: WikidataClient,
+    dimev_client: DimevClient | None = None,
+    ensure_related_for_person: EnsureRelatedFn | None = None,
+    ensure_person_for_work: EnsurePersonFn | None = None,
+    preferred_author_key: str | None = None,
+    preferred_author_text: str | None = None,
+    resolve_dimev_person: Callable[
+        [DimevAuthor], tuple[str | None, str, str | None]
+    ]
+    | None = None,
+) -> EntityDetails:
+    """Build normalized catalogue details for one source target."""
+
+    if target.source == "wikidata" and entity_type == EntityType.PERSON:
+        return build_person_details(
+            target.identifier,
+            fallback_text or target.identifier,
+            wikidata_client,
+            ensure_related_for_person,
+        )
+    if target.source == "wikidata" and entity_type == EntityType.PLACE:
+        return build_place_details(
+            target.identifier,
+            fallback_text or target.identifier,
+            wikidata_client,
+        )
+    if target.source == "wikidata" and entity_type == EntityType.ORG:
+        return build_org_details(
+            target.identifier,
+            fallback_text or target.identifier,
+            wikidata_client,
+        )
+    if target.source == "wikidata" and entity_type == EntityType.WORK:
+        if ensure_person_for_work is None:
+            raise ValueError(
+                "ensure_person_for_work is required for Wikidata work lookups"
+            )
+        return build_work_details(
+            target.identifier,
+            fallback_text or target.identifier,
+            wikidata_client,
+            ensure_person_for_work,
+            preferred_author_key=preferred_author_key,
+            preferred_author_text=preferred_author_text,
+        )
+    if target.source == "dimev" and entity_type == EntityType.WORK:
+        if dimev_client is None:
+            raise ValueError("dimev_client is required for DIMEV lookups")
+        return build_dimev_work_details(
+            target.identifier, dimev_client, resolve_dimev_person
+        )
+    raise ValueError(
+        f"Source '{target.source}' does not support entity type '{entity_type}'"
     )
 
 
@@ -2766,9 +2864,13 @@ def assign_key_for_details(
 
     explicit_id: str | None = None
     if entity_type in {EntityType.PERSON, EntityType.ORG}:
-        explicit_id = details.external_ids.viaf
+        explicit_id = external_identifier_value(
+            details.external_identifiers, "viaf"
+        )
     elif entity_type == EntityType.PLACE:
-        explicit_id = details.external_ids.tgn or details.external_ids.geonames
+        explicit_id = external_identifier_value(
+            details.external_identifiers, "tgn"
+        ) or external_identifier_value(details.external_identifiers, "geonames")
 
     if explicit_id is not None:
         numeric_id = int(explicit_id)
@@ -3065,11 +3167,11 @@ def apply_key_updates(
             if entity_type is None:
                 continue
 
-            qid = extract_qid(node.get("ref", ""))
-            if not qid:
+            parsed_ref = parse_supported_source_ref(node.get("ref", ""))
+            if parsed_ref is None:
                 continue
 
-            key = key_map.get((entity_type, qid))
+            key = key_map.get((entity_type, parsed_ref.lookup_key))
             if not key:
                 continue
 
@@ -3098,17 +3200,17 @@ def run_regenerate(args: argparse.Namespace, client: WikidataClient) -> int:
     created_related_messages: list[tuple[str, str]] = []
     regeneration_state = RegenerationState.load(repository=repository)
     for spec in args.entries:
-        key, qid = parse_regenerate_spec(spec)
-        if qid is None:
+        key, entry_source = parse_regenerate_spec(spec)
+        if entry_source is None:
             authority_path, _, child_tag = repository.paths.for_key(key)
-            qid = existing_entry_wikidata_qid(authority_path, key, child_tag)
-            if qid is None:
+            entry_source = existing_entry_source_ref(authority_path, key, child_tag)
+            if entry_source is None:
                 raise ValueError(
-                    f"Cannot regenerate {key} without an explicit Wikidata QID: no existing Wikidata link was found"
+                    f"Cannot regenerate {key} without an explicit source ref: no supported source link was found"
                 )
         authority_path, entity_type, created_related = regenerate_entry(
             key,
-            qid,
+            entry_source,
             persons_path=repository.paths.persons,
             places_path=repository.paths.places,
             works_path=repository.paths.works,
@@ -3122,7 +3224,7 @@ def run_regenerate(args: argparse.Namespace, client: WikidataClient) -> int:
             regeneration_state=regeneration_state,
         )
         regenerated.append(
-            (str(authority_path), f"{key} <- {qid} ({entity_type})")
+            (str(authority_path), f"{key} <- {entry_source.display_id} ({entity_type})")
         )
         for entry in created_related:
             target_path = (
@@ -3199,10 +3301,10 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
     candidates = collect_candidates(xml_paths)
 
     existing_maps: dict[EntityType, dict[str, str]] = {
-        EntityType.PERSON: repository.qid_map(EntityType.PERSON),
-        EntityType.PLACE: repository.qid_map(EntityType.PLACE),
-        EntityType.ORG: repository.qid_map(EntityType.ORG),
-        EntityType.WORK: repository.qid_map(EntityType.WORK),
+        EntityType.PERSON: repository.source_map(EntityType.PERSON),
+        EntityType.PLACE: repository.source_map(EntityType.PLACE),
+        EntityType.ORG: repository.source_map(EntityType.ORG),
+        EntityType.WORK: repository.source_map(EntityType.WORK),
     }
     person_display_map = repository.display_map(EntityType.PERSON)
     place_display_map = repository.display_map(EntityType.PLACE)
@@ -3229,12 +3331,16 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
     author_match_warnings: list[dict[str, str]] = []
     for candidate in candidates:
         fallback_by_target.setdefault(
-            (candidate.entity_type, candidate.source_id),
+            (candidate.entity_type, candidate.source.lookup_key),
             candidate.text or candidate.source_id,
         )
-        if candidate.entity_type == "work" and candidate.context_author_key:
+        if (
+            candidate.entity_type == "work"
+            and candidate.source.source == "wikidata"
+            and candidate.context_author_key
+        ):
             preferred_author_context_by_work_qid.setdefault(
-                candidate.source_id,
+                candidate.source.identifier,
                 (candidate.context_author_key, candidate.context_author_text),
             )
 
@@ -3263,10 +3369,9 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
                 )
             return equivalent_key, label
         key = ensure_entry(
-            AddRefTarget(
+            SourceTarget(
                 entity_type=entity_type,
-                source="wikidata",
-                identifier=qid,
+                ref=source_ref("wikidata", qid),
             ),
             entity_type,
             fallback_text,
@@ -3317,7 +3422,12 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
                     author_viaf is not None
                     and author_viaf in preferred_record.viaf_ids
                 ):
-                    key_map[(EntityType.PERSON, author_qid)] = preferred_key
+                    key_map[
+                        (
+                            EntityType.PERSON,
+                            source_ref("wikidata", author_qid).lookup_key,
+                        )
+                    ] = preferred_key
                     label = (
                         preferred_record.display_label
                         or person_display_map.get(preferred_key)
@@ -3335,7 +3445,9 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
                     }
                 )
 
-        existing_key = existing_maps[EntityType.PERSON].get(author_qid)
+        existing_key = existing_maps[EntityType.PERSON].get(
+            source_ref("wikidata", author_qid).lookup_key
+        )
         if not existing_key and author_viaf is not None:
             viaf_match_keys = [
                 record.key
@@ -3344,7 +3456,12 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
             ]
             if len(viaf_match_keys) == 1:
                 existing_key = viaf_match_keys[0]
-                key_map[(EntityType.PERSON, author_qid)] = existing_key
+                key_map[
+                    (
+                        EntityType.PERSON,
+                        source_ref("wikidata", author_qid).lookup_key,
+                    )
+                ] = existing_key
 
         if existing_key:
             label = (
@@ -3357,10 +3474,9 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
             return existing_key, label, None
 
         key = ensure_entry(
-            AddRefTarget(
+            SourceTarget(
                 entity_type=EntityType.PERSON,
-                source="wikidata",
-                identifier=author_qid,
+                ref=source_ref("wikidata", author_qid),
             ),
             EntityType.PERSON,
             author_qid,
@@ -3378,41 +3494,34 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
         )
 
     def ensure_entry(
-        entity_type: EntityType, qid: str, fallback_text: str
+        target_ref: SourceTarget, entity_type: EntityType, fallback_text: str
     ) -> str:
-        target = (entity_type, qid)
+        target = (entity_type, target_ref.lookup_key)
         if target in key_map:
             return key_map[target]
 
-        existing_key = existing_maps[entity_type].get(qid)
+        existing_key = existing_maps[entity_type].get(target_ref.lookup_key)
         if existing_key:
             key_map[target] = existing_key
             return existing_key
 
-        if entity_type == EntityType.PERSON:
-            details = build_person_details(
-                qid, fallback_text or qid, client, ensure_related_for_person
-            )
-        elif entity_type == EntityType.PLACE:
-            details = build_place_details(qid, fallback_text or qid, client)
-        elif entity_type == EntityType.ORG:
-            details = build_org_details(qid, fallback_text or qid, client)
-        else:
-            active_work_context["qid"] = qid
-            active_work_context["title"] = fallback_text or qid
-            details = build_work_details(
-                qid,
-                fallback_text or qid,
-                client,
-                ensure_person_for_work,
-                preferred_author_key=preferred_author_context_by_work_qid.get(
-                    qid, (None, None)
-                )[0],
-                preferred_author_text=preferred_author_context_by_work_qid.get(
-                    qid, (None, None)
-                )[1],
-            )
-            active_work_context.clear()
+        active_work_context["qid"] = target_ref.identifier
+        active_work_context["title"] = fallback_text or target_ref.identifier
+        details = build_details_for_target(
+            target_ref,
+            entity_type,
+            fallback_text,
+            wikidata_client=client,
+            ensure_related_for_person=ensure_related_for_person,
+            ensure_person_for_work=ensure_person_for_work,
+            preferred_author_key=preferred_author_context_by_work_qid.get(
+                target_ref.identifier, (None, None)
+            )[0],
+            preferred_author_text=preferred_author_context_by_work_qid.get(
+                target_ref.identifier, (None, None)
+            )[1],
+        )
+        active_work_context.clear()
 
         list_spec = route_entity(details, entity_type)
         new_key = assign_key_for_details(
@@ -3435,23 +3544,27 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
 
         key_map[target] = new_key
         planned[target] = PlannedEntry(
-            source_id=qid,
+            source=details.source,
             key=new_key,
             entity_type=entity_type,
             label=display_label_for_person(details)
             if entity_type == EntityType.PERSON
             else details.label,
             list_spec=list_spec,
-            external_ids=details.external_ids,
+            external_identifiers=details.external_identifiers,
             xml_snippet=snippet,
         )
         return new_key
 
     # Ensure direct targets from manuscript refs
-    for (entity_type, qid), fallback in sorted(
+    for (entity_type, lookup_key), fallback in sorted(
         fallback_by_target.items(), key=lambda x: (x[0][0], x[0][1])
     ):
-        ensure_entry(entity_type, qid, fallback)
+        parsed_ref = parse_supported_source_ref(lookup_key)
+        if parsed_ref is None:
+            source_name, identifier = lookup_key.split(":", 1)
+            parsed_ref = source_ref(source_name, identifier)
+        ensure_entry(SourceTarget(entity_type=entity_type, ref=parsed_ref), entity_type, fallback)
 
     # Collect new snippets per authority file
     entries_by_list: dict[tuple[str, str, str, str], list[PlannedEntry]] = {}
@@ -3490,11 +3603,9 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
                 "key": entry.key,
                 "label": entry.label,
                 "list_type": entry.list_spec.list_type,
-                "external_ids": {
-                    "viaf": entry.external_ids.viaf,
-                    "geonames": entry.external_ids.geonames,
-                    "tgn": entry.external_ids.tgn,
-                },
+                "external_ids": external_identifier_map(
+                    entry.external_identifiers
+                ),
             }
             for _, entry in sorted(
                 planned.items(), key=lambda x: (x[1].entity_type, x[1].key)
@@ -3506,7 +3617,9 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
                 "element": c.element_name,
                 "entity_type": c.entity_type,
                 "source_id": c.source_id,
-                "assigned_key": key_map.get((c.entity_type, c.source_id)),
+                "assigned_key": key_map.get(
+                    (c.entity_type, c.source.lookup_key)
+                ),
             }
             for c in candidates
         ],
@@ -3519,7 +3632,7 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
     )
 
     print(f"Candidates found: {len(candidates)}")
-    print(f"Unique Wikidata targets: {len(fallback_by_target)}")
+    print(f"Unique source targets: {len(fallback_by_target)}")
     print(f"New authority entries planned: {len(planned)}")
     print(f"Report written: {args.report}")
 
@@ -3584,26 +3697,19 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
     planned_person_display_map: dict[str, str] = {}
     planned_place_display_map: dict[str, str] = {}
     planned_org_display_map: dict[str, str] = {}
-    requested_targets: list[tuple[AddRefTarget, EntityType, str]] = []
+    requested_targets: list[tuple[SourceTarget, EntityType, str]] = []
     active_work_context: dict[str, str] = {}
 
     for spec in args.refs:
         target = parse_add_ref_spec(
             spec, forced_entity_type=forced_entity_type
         )
-        entity_type = target.entity_type
-        if entity_type is None:
-            entity_type = infer_entity_type_from_entity(target.identifier, client)
+        entity_type = infer_entity_type_for_target(target, client)
         if entity_type is None:
             raise ValueError(
                 f"Could not infer an authority type for {target.identifier}. Use --as or a typed spec such as place:{target.identifier}."
             )
-        if target.source == "wikidata":
-            fallback_text = preferred_label(
-                client.get_entity(target.identifier), target.identifier
-            ).value
-        else:
-            fallback_text = target.display_id
+        fallback_text = fallback_text_for_target(target, client)
         requested_targets.append((target, entity_type, fallback_text))
 
     def ensure_related_for_person(
@@ -3629,10 +3735,9 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
                 )
             return equivalent_key, label
         key = ensure_entry(
-            AddRefTarget(
+            SourceTarget(
                 entity_type=entity_type,
-                source="wikidata",
-                identifier=qid,
+                ref=source_ref("wikidata", qid),
             ),
             entity_type,
             fallback_text,
@@ -3674,7 +3779,7 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
             return preferred_key, label, None
 
         existing_key = existing_maps[EntityType.PERSON].get(
-            f"wikidata:{author_qid}"
+            source_ref("wikidata", author_qid).lookup_key
         )
         if existing_key:
             label = (
@@ -3689,10 +3794,9 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
             return existing_key, label, None
 
         key = ensure_entry(
-            AddRefTarget(
+            SourceTarget(
                 entity_type=EntityType.PERSON,
-                source="wikidata",
-                identifier=author_qid,
+                ref=source_ref("wikidata", author_qid),
             ),
             EntityType.PERSON,
             author_qid,
@@ -3727,7 +3831,7 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
         return None, author.display_name, "DIMEV"
 
     def ensure_entry(
-        target_ref: AddRefTarget, entity_type: EntityType, fallback_text: str
+        target_ref: SourceTarget, entity_type: EntityType, fallback_text: str
     ) -> str:
         target = (entity_type, target_ref.lookup_key)
         if target in key_map:
@@ -3738,37 +3842,19 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
             key_map[target] = existing_key
             return existing_key
 
-        if target_ref.source == "wikidata" and entity_type == EntityType.PERSON:
-            details = build_person_details(
-                target_ref.identifier,
-                fallback_text or target_ref.identifier,
-                client,
-                ensure_related_for_person,
-            )
-        elif target_ref.source == "wikidata" and entity_type == EntityType.PLACE:
-            details = build_place_details(
-                target_ref.identifier, fallback_text or target_ref.identifier, client
-            )
-        elif target_ref.source == "wikidata" and entity_type == EntityType.ORG:
-            details = build_org_details(
-                target_ref.identifier, fallback_text or target_ref.identifier, client
-            )
-        elif target_ref.source == "wikidata":
-            active_work_context["qid"] = target_ref.identifier
-            active_work_context["title"] = fallback_text or target_ref.identifier
-            details = build_work_details(
-                target_ref.identifier,
-                fallback_text or target_ref.identifier,
-                client,
-                ensure_person_for_work,
-            )
-            active_work_context.clear()
-        else:
-            details = build_dimev_work_details(
-                target_ref.identifier,
-                dimev_client,
-                resolve_dimev_person,
-            )
+        active_work_context["qid"] = target_ref.identifier
+        active_work_context["title"] = fallback_text or target_ref.identifier
+        details = build_details_for_target(
+            target_ref,
+            entity_type,
+            fallback_text,
+            wikidata_client=client,
+            dimev_client=dimev_client,
+            ensure_related_for_person=ensure_related_for_person,
+            ensure_person_for_work=ensure_person_for_work,
+            resolve_dimev_person=resolve_dimev_person,
+        )
+        active_work_context.clear()
 
         list_spec = route_entity(details, entity_type)
         new_key = assign_key_for_details(
@@ -3791,14 +3877,14 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
 
         key_map[target] = new_key
         planned[target] = PlannedEntry(
-            source_id=details.source_id,
+            source=details.source,
             key=new_key,
             entity_type=entity_type,
             label=display_label_for_person(details)
             if entity_type == EntityType.PERSON
             else details.label,
             list_spec=list_spec,
-            external_ids=details.external_ids,
+            external_identifiers=details.external_identifiers,
             xml_snippet=snippet,
         )
         return new_key
@@ -3836,11 +3922,9 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
                 "key": entry.key,
                 "label": entry.label,
                 "list_type": entry.list_spec.list_type,
-                "external_ids": {
-                    "viaf": entry.external_ids.viaf,
-                    "geonames": entry.external_ids.geonames,
-                    "tgn": entry.external_ids.tgn,
-                },
+                "external_ids": external_identifier_map(
+                    entry.external_identifiers
+                ),
             }
             for _, entry in sorted(
                 planned.items(), key=lambda x: (x[1].entity_type, x[1].key)

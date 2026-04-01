@@ -51,6 +51,65 @@ class EntityType(StrEnum):
     WORK = "work"
 
 
+@dataclass(slots=True, frozen=True)
+class SourceRef:
+    """A normalized external source reference.
+
+    ``source`` is a stable internal key such as ``wikidata`` or ``dimev``.
+    ``identifier`` is the source-local identifier without additional prefixing.
+    """
+
+    source: str
+    identifier: str
+    source_name: str | None = None
+
+    @property
+    def lookup_key(self) -> str:
+        """Return the normalized key used for local source-to-authority lookups."""
+
+        return f"{self.source}:{self.identifier}"
+
+    @property
+    def display_id(self) -> str:
+        """Return the user-facing source identifier string."""
+
+        if self.source == "wikidata":
+            return self.identifier
+        return f"{self.source.upper()}:{self.identifier}"
+
+    @property
+    def display_name(self) -> str:
+        """Return the human-readable source name."""
+
+        if self.source_name:
+            return self.source_name
+        return self.source.replace("_", " ").title()
+
+
+@dataclass(slots=True, frozen=True)
+class SourceTarget:
+    """A source ref requested by a workflow, optionally with a forced entity type."""
+
+    entity_type: EntityType | None
+    ref: SourceRef
+
+    @property
+    def source(self) -> str:
+        return self.ref.source
+
+    @property
+    def identifier(self) -> str:
+        return self.ref.identifier
+
+    @property
+    def lookup_key(self) -> str:
+        return self.ref.lookup_key
+
+    @property
+    def display_id(self) -> str:
+        return self.ref.display_id
+
+
 type EnsureRelatedFn = Callable[[EntityType, str, str], tuple[str, str]]
 type EnsurePersonFn = Callable[
     [str | None, str | None, str | None], tuple[str, str, str | None]
@@ -199,10 +258,16 @@ class Candidate:
     element_name: ElementName
     entity_type: EntityType
     ref: str
-    source_id: str
+    source: SourceRef
     text: str
     context_author_key: str | None = None
     context_author_text: str | None = None
+
+    @property
+    def source_id(self) -> str:
+        """Return the legacy display form of the primary source identifier."""
+
+        return self.source.display_id
 
 
 @dataclass(slots=True, frozen=True)
@@ -240,12 +305,11 @@ class LinkedAuthorityRef:
 
 
 @dataclass(slots=True, frozen=True)
-class ExternalAuthorityIds:
-    """External identifiers used to route and key new authority entries."""
+class ExternalIdentifier:
+    """An external identifier preserved as catalogue policy input."""
 
-    viaf: str | None = None
-    geonames: str | None = None
-    tgn: str | None = None
+    authority: str
+    value: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -334,9 +398,8 @@ class ClaimStatement:
 class EntityDetails:
     """Normalized external-source data ready for TEI serialization."""
 
-    source_id: str
+    source: SourceRef
     label: str
-    source_name: str = "Wikidata"
     source_ref: str | None = None
     label_lang: str | None = None
     display_subtype: str | None = None
@@ -364,20 +427,38 @@ class EntityDetails:
     nationalities: tuple[LinkedAuthorityRef, ...] = ()
     residences: tuple[LinkedAuthorityRef, ...] = ()
     occupations: tuple[NameVariant, ...] = ()
-    external_ids: ExternalAuthorityIds = ExternalAuthorityIds()
+    external_identifiers: tuple[ExternalIdentifier, ...] = ()
+
+    @property
+    def source_id(self) -> str:
+        """Return the legacy display form of the primary source identifier."""
+
+        return self.source.display_id
+
+    @property
+    def source_name(self) -> str:
+        """Return the human-readable source name used in generated TEI."""
+
+        return self.source.display_name
 
 
 @dataclass(slots=True, frozen=True)
 class PlannedEntry:
     """A prepared authority record that has not yet been inserted into XML."""
 
-    source_id: str
+    source: SourceRef
     key: str
     entity_type: EntityType
     label: str
     list_spec: AuthorityListSpec
-    external_ids: ExternalAuthorityIds
+    external_identifiers: tuple[ExternalIdentifier, ...]
     xml_snippet: str
+
+    @property
+    def source_id(self) -> str:
+        """Return the legacy display form of the primary source identifier."""
+
+        return self.source.display_id
 
 
 @dataclass(slots=True, frozen=True)

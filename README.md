@@ -106,6 +106,14 @@ The key workflow advantage is that manuscript cataloguing no longer has to be bl
 
 The current implementation uses Wikidata as its enrichment and reconciliation source. Direct work creation from DIMEV repository data is also supported by `authorities add`.
 
+Internally, the code now separates:
+
+- source parsing and lookup of external refs such as Wikidata and DIMEV
+- normalized catalogue-facing modelling of people, places, organisations, and works
+- project-specific catalogue policy, including the inherited VIAF, TGN, and GeoNames list-routing and key-allocation rules
+
+That split keeps the historic XML conventions explicit, while making it easier to add further sources without threading source-specific assumptions through every workflow.
+
 ## Requirements
 
 - Python 3.14+
