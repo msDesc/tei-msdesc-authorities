@@ -71,6 +71,16 @@ from .models import (
     element_to_entity,
     entity_to_prefix,
 )
+from .policy import MMOLCatalogueProfile
+from .records import PersonRecord, record_from_details
+from .renderer import (
+    MMOLTeiAuthorityRenderer,
+    display_date_suffix as render_display_date_suffix,
+    display_label_for_person as render_display_label_for_person,
+    floruit_certainty as render_floruit_certainty,
+    format_text_with_lbs as render_text_with_lbs,
+)
+from .services import AuthorityEntryPlanner
 from .dimev import (
     DimevAuthor,
     DimevClient,
@@ -84,6 +94,12 @@ type EnsureRelatedFn = Callable[[EntityType, str, str], tuple[str, str]]
 type EnsurePersonFn = Callable[
     [str | None, str | None, str | None], tuple[str, str, str | None]
 ]
+
+MMOL_CATALOGUE_PROFILE = MMOLCatalogueProfile()
+MMOL_TEI_RENDERER = MMOLTeiAuthorityRenderer()
+AUTHORITY_ENTRY_PLANNER = AuthorityEntryPlanner(
+    policy=MMOL_CATALOGUE_PROFILE, renderer=MMOL_TEI_RENDERER
+)
 
 
 @dataclass(slots=True)
@@ -1244,26 +1260,20 @@ def regenerate_entry(
             )
             planned_label_map = org_display_map
 
-        new_key = assign_key_for_details(
-            details, entity_type, used_ids, min_ids
+        planned_entry = AUTHORITY_ENTRY_PLANNER.plan_entry(
+            entity_type, details, used_ids, min_ids
         )
-        snippet = (
-            build_place_snippet(new_key, details)
-            if entity_type == "place"
-            else build_org_snippet(new_key, details)
-        )
-        list_spec = route_entity(details, entity_type)
         planned_related[target] = PlannedEntry(
-            source=source_ref("wikidata", related_qid),
-            key=new_key,
-            entity_type=entity_type,
-            label=details.label,
-            list_spec=list_spec,
-            external_identifiers=details.external_identifiers,
-            xml_snippet=snippet,
+            source=planned_entry.source,
+            key=planned_entry.key,
+            entity_type=planned_entry.entity_type,
+            label=planned_entry.label,
+            list_spec=planned_entry.list_spec,
+            external_identifiers=planned_entry.external_identifiers,
+            xml_snippet=planned_entry.xml_snippet,
         )
-        planned_label_map[new_key] = details.label
-        return new_key, details.label
+        planned_label_map[planned_entry.key] = details.label
+        return planned_entry.key, details.label
 
     details = build_details_for_target(
         SourceTarget(entity_type=entity_type, ref=entry_source),
@@ -1273,14 +1283,9 @@ def regenerate_entry(
         ensure_related_for_person=ensure_related_for_person,
         ensure_person_for_work=ensure_person_for_work,
     )
-    if entity_type == "person":
-        snippet = build_person_snippet(key, details)
-    elif entity_type == "place":
-        snippet = build_place_snippet(key, details)
-    elif entity_type == "org":
-        snippet = build_org_snippet(key, details)
-    else:
-        snippet = build_work_snippet(key, details)
+    snippet = MMOL_TEI_RENDERER.render(
+        key, entity_type, record_from_details(entity_type, details)
+    )
 
     if planned_related:
         entries_by_list: dict[
@@ -1871,56 +1876,19 @@ def floruit_from_entity(
 
 
 def floruit_certainty(floruit: FloruitRange | None) -> str | None:
-    if floruit is None:
-        return None
-    precisions = [
-        precision
-        for precision in (floruit.from_precision, floruit.to_precision)
-        if isinstance(precision, int)
-    ]
-    if not precisions:
-        return None
-    lowest_precision = min(precisions)
-    if lowest_precision < 9:
-        return "low"
-    return None
+    return render_floruit_certainty(floruit)
 
 
 def display_date_suffix(details: EntityDetails) -> str | None:
-    def format_display_life_date(value: str) -> str:
-        if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
-            return value[:4]
-        return format_precision_date(
-            value, 9 if re.match(r"^\d{4}$", value) else None
-        )
-
-    def qualify(value: str, uncertain: bool) -> str:
-        rendered = format_display_life_date(value)
-        return f"{rendered}?" if uncertain else rendered
-
-    if details.birth and details.death:
-        return f"{qualify(details.birth, details.birth_uncertain)}–{qualify(details.death, details.death_uncertain)}"
-    if details.death and not details.birth:
-        return f"–{qualify(details.death, details.death_uncertain)}"
-    if details.birth and not details.death:
-        return f"{qualify(details.birth, details.birth_uncertain)}–"
-    if (
-        details.floruit
-        and details.floruit.from_value
-        and details.floruit.to_value
-    ):
-        return (
-            f"fl. {format_precision_date(details.floruit.from_value, details.floruit.from_precision)}"
-            f"–{format_precision_date(details.floruit.to_value, details.floruit.to_precision)}"
-        )
-    return None
+    record = record_from_details(EntityType.PERSON, details)
+    assert isinstance(record, PersonRecord)
+    return render_display_date_suffix(record)
 
 
 def display_label_for_person(details: EntityDetails) -> str:
-    suffix = display_date_suffix(details)
-    if suffix and suffix not in details.label:
-        return f"{details.label}, {suffix}"
-    return details.label
+    record = record_from_details(EntityType.PERSON, details)
+    assert isinstance(record, PersonRecord)
+    return render_display_label_for_person(record)
 
 
 def strip_existing_person_date_suffix(label: str) -> str:
@@ -2493,182 +2461,41 @@ def build_dimev_work_details(
 
 
 def build_person_snippet(key: str, details: EntityDetails) -> str:
-    lines = [f'            <person xml:id="{key}">']
-    lines.append(
-        f"               <persName{format_attrs(source=details.source_name, subtype=details.display_subtype, type='display')}>{escape(display_label_for_person(details))}</persName>"
+    return MMOL_TEI_RENDERER.render(
+        key, EntityType.PERSON, record_from_details(EntityType.PERSON, details)
     )
-    for variant in details.variants:
-        lines.append(
-            f"               <persName{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</persName>"
-        )
-    if details.birth:
-        lines.append(
-            f"               <birth{format_attrs(cert='medium' if details.birth_uncertain else None, source=details.source_name, when=details.birth)}/>"
-        )
-    if details.death:
-        lines.append(
-            f"               <death{format_attrs(cert='medium' if details.death_uncertain else None, source=details.source_name, when=details.death)}/>"
-        )
-    if details.floruit and (
-        details.floruit.from_value or details.floruit.to_value
-    ):
-        floruit_attrs: dict[str, str | None] = {
-            "cert": floruit_certainty(details.floruit),
-            "from": details.floruit.from_value,
-            "to": details.floruit.to_value,
-        }
-        parts = [
-            f'{name}="{escape(value)}"'
-            for name, value in sorted(floruit_attrs.items())
-            if value is not None
-        ]
-        lines.append(f"               <floruit {' '.join(parts)}/>")
-    if details.sex:
-        lines.append(
-            f"               <sex{format_attrs(source=details.source_name)}>{details.sex}</sex>"
-        )
-    for affiliation in details.affiliations:
-        lines.append(
-            f"               <affiliation{format_attrs(type=affiliation.relation_type)}><orgName{format_attrs(key=affiliation.key, source=details.source_name)}>{escape(affiliation.label)}</orgName></affiliation>"
-        )
-    for education in details.educations:
-        lines.append(
-            f"               <education><orgName{format_attrs(key=education.key, source=details.source_name)}>{escape(education.label)}</orgName></education>"
-        )
-    for nationality in details.nationalities:
-        lines.append(
-            f"               <nationality{format_attrs(key=nationality.key, source=details.source_name)}>{escape(nationality.label)}</nationality>"
-        )
-    for residence in details.residences:
-        lines.append(
-            f"               <residence><placeName{format_attrs(key=residence.key, source=details.source_name)}>{escape(residence.label)}</placeName></residence>"
-        )
-    for occupation in details.occupations:
-        lines.append(
-            f"               <occupation{format_attrs(source=details.source_name, **{'xml:lang': occupation.lang})}>{escape(occupation.value)}</occupation>"
-        )
-    lines.extend(links_note_xml(details.links, "               "))
-    lines.append("            </person>")
-    return "\n".join(lines)
 
 
 def build_place_snippet(key: str, details: EntityDetails) -> str:
-    lines = [
-        f"            <place{format_attrs(type=details.place_type, **{'xml:id': key})}>"
-    ]
-    lines.append(
-        f"               <placeName{format_attrs(source=details.source_name, type='index')}>{escape(details.label)}</placeName>"
+    return MMOL_TEI_RENDERER.render(
+        key, EntityType.PLACE, record_from_details(EntityType.PLACE, details)
     )
-    for variant in details.variants:
-        lines.append(
-            f"               <placeName{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</placeName>"
-        )
-    if details.coordinates is not None:
-        lines.append(
-            f'               <location source="{escape(details.source_ref or f"https://www.wikidata.org/entity/{details.source_id}")}">'
-        )
-        lines.append(
-            f"                  <geo>{details.coordinates.latitude},{details.coordinates.longitude}</geo>"
-        )
-        lines.append("               </location>")
-    lines.extend(links_note_xml(details.links, "               "))
-    lines.append("            </place>")
-    return "\n".join(lines)
 
 
 def build_org_snippet(key: str, details: EntityDetails) -> str:
-    lines = [f'            <org xml:id="{key}">']
-    lines.append(
-        f"               <orgName{format_attrs(source=details.source_name, type='display')}>{escape(details.label)}</orgName>"
+    return MMOL_TEI_RENDERER.render(
+        key, EntityType.ORG, record_from_details(EntityType.ORG, details)
     )
-    for variant in details.variants:
-        lines.append(
-            f"               <orgName{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</orgName>"
-        )
-    lines.extend(links_note_xml(details.links, "               "))
-    lines.append("            </org>")
-    return "\n".join(lines)
 
 
 def build_work_snippet(key: str, details: EntityDetails) -> str:
-    lines = [f'            <bibl xml:id="{key}">']
-    for author in details.authors:
-        lines.append(
-            f"               <author{format_attrs(key=author.key, source=author.source)}>{escape(author.label)}</author>"
-        )
-    uniform_parts: list[str] = []
-    if details.authors:
-        uniform_parts.append(
-            "; ".join(author.label for author in details.authors)
-        )
-        uniform_parts.append(": ")
-    uniform_parts.append(details.label)
-    if details.main_lang_label:
-        uniform_parts.append(f" [{details.main_lang_label}]")
-    lines.append(
-        f"               <title{format_attrs(source=details.source_name, type='uniform')}>{escape(''.join(uniform_parts))}</title>"
+    return MMOL_TEI_RENDERER.render(
+        key, EntityType.WORK, record_from_details(EntityType.WORK, details)
     )
-    lines.append(
-        f"               <title{format_attrs(source=details.source_name, type='primary')}>{escape(details.label)}</title>"
-    )
-    for variant in details.variants:
-        lines.append(
-            f"               <title{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</title>"
-        )
-    lines.append(
-        f'               <textLang mainLang="{escape(details.main_lang or "und")}"/>'
-    )
-    if details.incipit:
-        lines.append(
-            f"               <incipit{format_attrs(source=details.source_name, **{'xml:lang': details.incipit_lang})}>{format_text_with_lbs(details.incipit)}</incipit>"
-        )
-    for incipit in details.extra_incipits:
-        lines.append(
-            f"               <incipit{format_attrs(source=details.source_name, **{'xml:lang': details.incipit_lang})}>{format_text_with_lbs(incipit)}</incipit>"
-        )
-    for explicit in details.explicits:
-        lines.append(
-            f"               <explicit{format_attrs(source=details.source_name, **{'xml:lang': details.incipit_lang})}>{format_text_with_lbs(explicit)}</explicit>"
-        )
-    for subject in details.subjects:
-        lines.append(
-            f"               <term{format_attrs(source=details.source_name)}>{escape(subject)}</term>"
-        )
-    lines.extend(links_note_xml(details.links, "               "))
-    lines.append("            </bibl>")
-    return "\n".join(lines)
 
 
 def format_text_with_lbs(text: str) -> str:
     """Escape lineated text content while preserving ``<lb/>`` boundaries."""
 
-    parts = [escape(part) for part in text.split("\n")]
-    return "<lb/>".join(parts)
+    return render_text_with_lbs(text)
 
 
 def route_entity(
     details: EntityDetails, entity_type: EntityType
 ) -> AuthorityListSpec:
-    if entity_type == "place":
-        if external_identifier_value(details.external_identifiers, "tgn"):
-            return AuthorityListSpec("listPlace", "TGN", "place", "place")
-        if external_identifier_value(details.external_identifiers, "geonames"):
-            return AuthorityListSpec("listPlace", "geonames", "place", "place")
-        return AuthorityListSpec("listPlace", "local", "place", "place")
-
-    if entity_type == "person":
-        if external_identifier_value(details.external_identifiers, "viaf"):
-            return AuthorityListSpec("listPerson", "VIAF", "person", "person")
-        return AuthorityListSpec("listPerson", "local", "person", "person")
-
-    if entity_type == "org":
-        if external_identifier_value(details.external_identifiers, "viaf"):
-            return AuthorityListSpec("listOrg", "VIAF", "org", "org")
-        return AuthorityListSpec("listOrg", "local", "org", "org")
-
-    if details.authors:
-        return AuthorityListSpec("listBibl", "authors", "bibl", "work")
-    return AuthorityListSpec("listBibl", "anonymous", "bibl", "work")
+    return MMOL_CATALOGUE_PROFILE.route_record(
+        entity_type, record_from_details(entity_type, details)
+    )
 
 
 def infer_entity_type_from_entity(
@@ -2860,28 +2687,12 @@ def assign_key_for_details(
     used_ids: dict[str, set[int]],
     min_ids: dict[str, int],
 ) -> str:
-    prefix = entity_to_prefix(entity_type)
-
-    explicit_id: str | None = None
-    if entity_type in {EntityType.PERSON, EntityType.ORG}:
-        explicit_id = external_identifier_value(
-            details.external_identifiers, "viaf"
-        )
-    elif entity_type == EntityType.PLACE:
-        explicit_id = external_identifier_value(
-            details.external_identifiers, "tgn"
-        ) or external_identifier_value(details.external_identifiers, "geonames")
-
-    if explicit_id is not None:
-        numeric_id = int(explicit_id)
-        if numeric_id in used_ids[prefix]:
-            raise ValueError(
-                f"Cannot create {prefix}_{numeric_id}: numeric ID already exists in authority file"
-            )
-        used_ids[prefix].add(numeric_id)
-        return f"{prefix}_{numeric_id}"
-
-    return f"{prefix}_{next_available_id(used_ids[prefix], min_ids[prefix])}"
+    return MMOL_CATALOGUE_PROFILE.assign_key(
+        entity_type,
+        record_from_details(entity_type, details),
+        used_ids,
+        min_ids,
+    )
 
 
 def key_number(key: str) -> int:
@@ -3523,38 +3334,20 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
         )
         active_work_context.clear()
 
-        list_spec = route_entity(details, entity_type)
-        new_key = assign_key_for_details(
-            details, entity_type, used_ids, min_ids
+        planned_entry = AUTHORITY_ENTRY_PLANNER.plan_entry(
+            entity_type, details, used_ids, min_ids
         )
 
         if entity_type == EntityType.PERSON:
-            snippet = build_person_snippet(new_key, details)
-            planned_person_display_map[new_key] = display_label_for_person(
-                details
-            )
+            planned_person_display_map[planned_entry.key] = planned_entry.label
         elif entity_type == EntityType.PLACE:
-            snippet = build_place_snippet(new_key, details)
-            planned_place_display_map[new_key] = details.label
+            planned_place_display_map[planned_entry.key] = details.label
         elif entity_type == EntityType.ORG:
-            snippet = build_org_snippet(new_key, details)
-            planned_org_display_map[new_key] = details.label
-        else:
-            snippet = build_work_snippet(new_key, details)
+            planned_org_display_map[planned_entry.key] = details.label
 
-        key_map[target] = new_key
-        planned[target] = PlannedEntry(
-            source=details.source,
-            key=new_key,
-            entity_type=entity_type,
-            label=display_label_for_person(details)
-            if entity_type == EntityType.PERSON
-            else details.label,
-            list_spec=list_spec,
-            external_identifiers=details.external_identifiers,
-            xml_snippet=snippet,
-        )
-        return new_key
+        key_map[target] = planned_entry.key
+        planned[target] = planned_entry
+        return planned_entry.key
 
     # Ensure direct targets from manuscript refs
     for (entity_type, lookup_key), fallback in sorted(
@@ -3856,38 +3649,20 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
         )
         active_work_context.clear()
 
-        list_spec = route_entity(details, entity_type)
-        new_key = assign_key_for_details(
-            details, entity_type, used_ids, min_ids
+        planned_entry = AUTHORITY_ENTRY_PLANNER.plan_entry(
+            entity_type, details, used_ids, min_ids
         )
 
         if entity_type == EntityType.PERSON:
-            snippet = build_person_snippet(new_key, details)
-            planned_person_display_map[new_key] = display_label_for_person(
-                details
-            )
+            planned_person_display_map[planned_entry.key] = planned_entry.label
         elif entity_type == EntityType.PLACE:
-            snippet = build_place_snippet(new_key, details)
-            planned_place_display_map[new_key] = details.label
+            planned_place_display_map[planned_entry.key] = details.label
         elif entity_type == EntityType.ORG:
-            snippet = build_org_snippet(new_key, details)
-            planned_org_display_map[new_key] = details.label
-        else:
-            snippet = build_work_snippet(new_key, details)
+            planned_org_display_map[planned_entry.key] = details.label
 
-        key_map[target] = new_key
-        planned[target] = PlannedEntry(
-            source=details.source,
-            key=new_key,
-            entity_type=entity_type,
-            label=display_label_for_person(details)
-            if entity_type == EntityType.PERSON
-            else details.label,
-            list_spec=list_spec,
-            external_identifiers=details.external_identifiers,
-            xml_snippet=snippet,
-        )
-        return new_key
+        key_map[target] = planned_entry.key
+        planned[target] = planned_entry
+        return planned_entry.key
 
     for target_ref, entity_type, fallback_text in requested_targets:
         ensure_entry(target_ref, entity_type, fallback_text)
