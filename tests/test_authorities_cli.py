@@ -37,6 +37,15 @@ def test_parse_args_accepts_add_with_forced_type(cli_module) -> None:
     assert args.refs == ["Q145", "https://www.wikidata.org/entity/Q21"]
 
 
+def test_parse_args_accepts_add_with_dimev_ref(cli_module) -> None:
+    args = cli_module.parse_args(
+        ["add", "https://www.dimev.net/record.php?recID=2613"]
+    )
+
+    assert args.command == "add"
+    assert args.refs == ["https://www.dimev.net/record.php?recID=2613"]
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

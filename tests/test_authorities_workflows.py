@@ -239,7 +239,7 @@ def test_main_reports_created_related_entries_during_regeneration(
             "person",
             (
                 module.PlannedEntry(
-                    qid="QORG",
+                    source_id="QORG",
                     key="org_123",
                     entity_type="org",
                     label="Cirencester Abbey",
@@ -250,7 +250,7 @@ def test_main_reports_created_related_entries_during_regeneration(
                     xml_snippet="<org/>",
                 ),
                 module.PlannedEntry(
-                    qid="QPLACE",
+                    source_id="QPLACE",
                     key="place_456",
                     entity_type="place",
                     label="England",
@@ -650,7 +650,7 @@ def test_run_add_creates_place_entry_from_wikidata_ref(
     report = tmp_path / "report.json"
 
     persons.write_text(
-        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listPerson type="local"></listPerson><listPerson type="VIAF"></listPerson></body></text></TEI>""",
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listPerson type="local"><person xml:id="person_42"><persName type="display">Spaldyng, Richard</persName></person></listPerson><listPerson type="VIAF"></listPerson></body></text></TEI>""",
         encoding="utf-8",
     )
     places.write_text(
@@ -719,4 +719,86 @@ def test_run_add_creates_place_entry_from_wikidata_ref(
 
     output = capsys.readouterr().out
     assert "added place_7008591 <- Q145 (place)" in output
+    assert report.exists()
+
+
+def test_run_add_creates_work_entry_from_dimev_ref(
+    module, client, tmp_path: Path, capsys
+) -> None:
+    persons = tmp_path / "persons.xml"
+    places = tmp_path / "places.xml"
+    works = tmp_path / "works.xml"
+    report = tmp_path / "report.json"
+
+    persons.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listPerson type="local"><person xml:id="person_42"><persName type="display">Spaldyng, Richard</persName></person></listPerson><listPerson type="VIAF"></listPerson></body></text></TEI>""",
+        encoding="utf-8",
+    )
+    places.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listPlace type="local"></listPlace><listPlace type="TGN"></listPlace><listPlace type="geonames"></listPlace><listOrg type="local"></listOrg><listOrg type="VIAF"></listOrg></body></text></TEI>""",
+        encoding="utf-8",
+    )
+    works.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0"><text><body><listBibl type="authors"></listBibl><listBibl type="anonymous"></listBibl></body></text></TEI>""",
+        encoding="utf-8",
+    )
+
+    args = SimpleNamespace(
+        persons=persons,
+        places=places,
+        works=works,
+        no_fetch=False,
+        dry_run=False,
+        refs=["https://www.dimev.net/record.php?recID=2613"],
+        entity_type=None,
+        person_min_id=1,
+        place_min_id=1,
+        org_min_id=1,
+        work_min_id=1,
+        report=report,
+    )
+
+    original_get_record = module.DimevClient.get_record
+
+    def fake_get_record(self, record_id: str):
+        assert record_id == "2613"
+        return module.DimevRecord(
+            record_id="2613",
+            title="In the name of the blessed Trinity",
+            title_variants=(),
+            authors=(
+                module.DimevAuthor(first="Richard", last="Spaldyng"),
+            ),
+            first_lines=(
+                "In the name of the blessid trinyte",
+                "The fader þe sone and þe holi goost",
+            ),
+            last_lines=(
+                "Thorgh vertu and grace of þis [cross] holy syne",
+                "Where on þow suffred þi passyon pyne",
+            ),
+            subjects=("prayers", "domestic life"),
+            imev_id="1557",
+            nimev_id="1557",
+        )
+
+    module.DimevClient.get_record = fake_get_record
+    try:
+        assert module.run_add(args, client) == 0
+    finally:
+        module.DimevClient.get_record = original_get_record
+
+    updated_works = works.read_text(encoding="utf-8")
+    assert 'xml:id="work_1"' in updated_works
+    assert 'source="DIMEV" type="uniform"' in updated_works
+    assert "In the name of the blessed Trinity" in updated_works
+    assert "Middle English" in updated_works
+    assert "https://www.dimev.net/record.php?recID=2613" in updated_works
+    assert '<author key="person_42">Spaldyng, Richard</author>' in updated_works
+    assert updated_works.count("<incipit ") == 2
+    assert updated_works.count("<explicit ") == 2
+    assert '<term source="DIMEV">prayers</term>' in updated_works
+
+    output = capsys.readouterr().out
+    assert "added work_1 <- DIMEV:2613 (work)" in output
     assert report.exists()

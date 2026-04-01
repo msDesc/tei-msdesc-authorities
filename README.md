@@ -104,7 +104,7 @@ The key workflow advantage is that manuscript cataloguing no longer has to be bl
 
 ## External Source Support
 
-The current implementation uses Wikidata as its enrichment and reconciliation source. The command surface and internal structure are designed so that other sources can be added later, but Wikidata is the only live external source supported at present.
+The current implementation uses Wikidata as its enrichment and reconciliation source. Direct work creation from DIMEV repository data is also supported by `authorities add`.
 
 ## Requirements
 
@@ -157,7 +157,7 @@ line is the main supported interface for downstream repositories.
 
 #### `authorities add`
 
-Add one or more authority entries directly from Wikidata IDs or URLs, without
+Add one or more authority entries directly from supported external source IDs or URLs, without
 requiring a manuscript file to contain the corresponding `@ref` first.
 
 Examples:
@@ -167,12 +167,15 @@ uv run authorities add Q145
 uv run authorities add https://www.wikidata.org/entity/Q145
 uv run authorities add place:Q145
 uv run authorities add --as place Q145 Q21
+uv run authorities add https://www.dimev.net/record.php?recID=2613
+uv run authorities add dimev:2613
 ```
 
 If the entity type is obvious, the command will infer it. Where there is no TEI
 context and the type would otherwise be ambiguous, use either:
 
 - `--as person|place|org|work`
+- DIMEV refs are work-only and may be given either as full DIMEV record URLs or as `dimev:RECORD_ID`
 - a typed spec such as `place:Q145`
 
 Useful options:

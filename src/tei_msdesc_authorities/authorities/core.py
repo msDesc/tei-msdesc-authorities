@@ -69,6 +69,13 @@ from .models import (
     element_to_entity,
     entity_to_prefix,
 )
+from .dimev import (
+    DimevAuthor,
+    DimevClient,
+    DimevRecord,
+    extract_dimev_id,
+    parse_dimev_record,
+)
 from .wikidata import WikidataClient
 
 type EnsureRelatedFn = Callable[[EntityType, str, str], tuple[str, str]]
@@ -319,6 +326,25 @@ def extract_qid(ref: str) -> str | None:
     return None
 
 
+@dataclass(slots=True, frozen=True)
+class AddRefTarget:
+    """A normalized external source reference supplied to ``authorities add``."""
+
+    entity_type: EntityType | None
+    source: str
+    identifier: str
+
+    @property
+    def lookup_key(self) -> str:
+        return f"{self.source}:{self.identifier}"
+
+    @property
+    def display_id(self) -> str:
+        if self.source == "wikidata":
+            return self.identifier
+        return f"DIMEV:{self.identifier}"
+
+
 def collect_candidates(xml_paths: list[Path]) -> list[Candidate]:
     """Collect unresolved manuscript references that should become local keys."""
 
@@ -363,7 +389,7 @@ def collect_candidates(xml_paths: list[Path]) -> list[Candidate]:
                     element_name=element_name,
                     entity_type=entity_type,
                     ref=ref,
-                    qid=qid,
+                    source_id=qid,
                     text=text,
                     context_author_key=context_author_key,
                     context_author_text=context_author_text,
@@ -401,6 +427,47 @@ def read_existing_qid_map(
     return mapping
 
 
+def extract_supported_target_id(target: str) -> str | None:
+    """Normalize supported external targets for add-time reuse checks."""
+
+    qid = extract_qid(target)
+    if qid is not None:
+        return f"wikidata:{qid}"
+    dimev_id = extract_dimev_id(target)
+    if dimev_id is not None:
+        return f"dimev:{dimev_id}"
+    return None
+
+
+def read_existing_source_map(
+    authority_path: Path, entity_type: EntityType
+) -> dict[str, str]:
+    """Map supported external targets to existing local authority keys."""
+
+    tree = parse_xml(authority_path)
+    if entity_type == EntityType.PERSON:
+        entries = xpath_elements(tree, "//tei:person[@xml:id]")
+    elif entity_type == EntityType.WORK:
+        entries = xpath_elements(tree, "//tei:bibl[@xml:id]")
+    elif entity_type == EntityType.PLACE:
+        entries = xpath_elements(tree, "//tei:place[@xml:id]")
+    else:
+        entries = xpath_elements(tree, "//tei:org[@xml:id]")
+
+    mapping: dict[str, str] = {}
+    for node in entries:
+        xml_id = node.get(f"{{{NS['xml']}}}id")
+        if not xml_id:
+            continue
+        for target in xpath_strings(
+            node, './/tei:note[@type="links"]//tei:ref/@target'
+        ):
+            source_id = extract_supported_target_id(target)
+            if source_id:
+                mapping[source_id] = xml_id
+    return mapping
+
+
 def read_person_display_map(authority_path: Path) -> dict[str, str]:
     tree = parse_xml(authority_path)
     mapping: dict[str, str] = {}
@@ -432,7 +499,7 @@ def read_entity_display_map(
         xpath = './tei:orgName[@type="display"][1]'
     elif entity_type == EntityType.WORK:
         entries = xpath_elements(tree, "//tei:bibl[@xml:id]")
-        xpath = './tei:title[@type="uniform"][1]'
+        xpath = './tei:title[@type="primary" or @type="uniform"][1]'
     else:
         return read_person_display_map(authority_path)
     for node in entries:
@@ -483,6 +550,12 @@ def read_person_authority_records(
             if text:
                 display_label = text
 
+        variant_labels: list[str] = []
+        for variant_node in xpath_elements(node, './tei:persName[@type="variant"]'):
+            text = normalize_element_text(variant_node)
+            if text and text not in variant_labels:
+                variant_labels.append(text)
+
         wikidata_qids: set[str] = set()
         viaf_ids: set[str] = set()
         for target_value in xpath_strings(
@@ -498,6 +571,7 @@ def read_person_authority_records(
         records[key] = PersonAuthorityRecord(
             key=key,
             display_label=display_label,
+            variant_labels=tuple(variant_labels),
             wikidata_qids=frozenset(wikidata_qids),
             viaf_ids=frozenset(viaf_ids),
         )
@@ -534,6 +608,46 @@ def normalize_name_for_match(value: str) -> str:
     lowered = re.sub(r"[^\w\s]", " ", lowered)
     lowered = re.sub(r"\s+", " ", lowered)
     return lowered.strip()
+
+
+def person_name_match_keys(label: str) -> tuple[str, ...]:
+    """Return normalized name forms suitable for exact local-person matching."""
+
+    base = strip_display_date_suffix(label)
+    variants: list[str] = []
+    normalized = normalize_name_for_match(base)
+    if normalized:
+        variants.append(normalized)
+    if ", " in base:
+        family, rest = base.split(", ", 1)
+        natural = normalize_name_for_match(f"{rest} {family}")
+        if natural and natural not in variants:
+            variants.append(natural)
+    return tuple(variants)
+
+
+def build_person_name_index(
+    records: dict[str, PersonAuthorityRecord],
+) -> dict[str, str]:
+    """Map unambiguous normalized person names to existing local keys."""
+
+    candidates: dict[str, set[str]] = {}
+    for key, record in records.items():
+        labels = [
+            label
+            for label in (record.display_label, *record.variant_labels)
+            if label
+        ]
+        if not labels:
+            continue
+        for label in labels:
+            for match_key in person_name_match_keys(label):
+                candidates.setdefault(match_key, set()).add(key)
+    resolved: dict[str, str] = {}
+    for match_key, keys in candidates.items():
+        if len(keys) == 1:
+            resolved[match_key] = next(iter(keys))
+    return resolved
 
 
 def parse_existing_person_entries(
@@ -969,7 +1083,9 @@ def existing_entry_fallback_text(
     elif child_tag == "org":
         display = xpath_elements(node, './tei:orgName[@type="display"][1]')
     else:
-        display = xpath_elements(node, './tei:title[@type="uniform"][1]')
+        display = xpath_elements(
+            node, './tei:title[@type="primary" or @type="uniform"][1]'
+        )
     if display:
         display_node = display[0]
         text = normalize_element_text(display_node)
@@ -1139,7 +1255,7 @@ def regenerate_entry(
         )
         list_spec = route_entity(details, entity_type)
         planned_related[target] = PlannedEntry(
-            qid=related_qid,
+            source_id=related_qid,
             key=new_key,
             entity_type=entity_type,
             label=details.label,
@@ -1187,7 +1303,7 @@ def regenerate_entry(
             )
         for (_, _), entry in sorted(planned_related.items()):
             state.record_entry(
-                entry.entity_type, entry.qid, entry.key, entry.label
+                entry.entity_type, entry.source_id, entry.key, entry.label
             )
 
     repository.replace_entry(key, child_tag, snippet)
@@ -2144,7 +2260,7 @@ def build_person_details(
         ),
     ]
     return EntityDetails(
-        qid=qid,
+        source_id=qid,
         label=normalized_label,
         label_lang=display.lang,
         display_subtype=display_subtype,
@@ -2182,7 +2298,7 @@ def build_place_details(
     coordinates = claim_coordinates(entity)
     curated_pids = {pid for pid, _, _ in PLACE_ID_LINKS}
     return EntityDetails(
-        qid=qid,
+        source_id=qid,
         label=display.value,
         label_lang=display.lang,
         variants=collect_variants(entity, display),
@@ -2208,7 +2324,7 @@ def build_org_details(
     display = preferred_label(entity, fallback)
     curated_pids = {pid for pid, _, _ in PERSON_ID_LINKS}
     return EntityDetails(
-        qid=qid,
+        source_id=qid,
         label=display.value,
         label_lang=display.lang,
         variants=collect_variants(entity, display),
@@ -2267,7 +2383,7 @@ def build_work_details(
     incipit = first_monolingual_text(entity, "P1922")
 
     return EntityDetails(
-        qid=qid,
+        source_id=qid,
         label=display.value,
         label_lang=display.lang,
         variants=collect_variants(entity, display),
@@ -2292,22 +2408,92 @@ def build_work_details(
     )
 
 
+def build_dimev_work_details(
+    record_id: str,
+    client: DimevClient,
+    resolve_person: Callable[[DimevAuthor], tuple[str | None, str, str | None]]
+    | None = None,
+) -> EntityDetails:
+    """Build work details from a DIMEV record."""
+
+    record = client.get_record(record_id)
+    if record is None:
+        reason = client.last_error or "failed to fetch DIMEV record"
+        raise ValueError(
+            f"Cannot create work entry from DIMEV:{record_id}: {reason}"
+        )
+
+    links = [
+        LinkItem(
+            title="Digital Index of Middle English Verse",
+            target=record.record_url,
+        )
+    ]
+    if record.imev_id:
+        links.append(
+            LinkItem(
+                title="Index of Middle English Verse",
+                target=f"https://www.dimev.net/Results.php?imev={record.imev_id}",
+            )
+        )
+    if record.nimev_id:
+        links.append(
+            LinkItem(
+                title="New Index of Middle English Verse",
+                target=f"https://www.dimev.net/Results.php?nimev={record.nimev_id}",
+            )
+        )
+
+    authors: list[WorkAuthor] = []
+    if resolve_person is not None:
+        for author in record.authors:
+            key, label, source = resolve_person(author)
+            authors.append(WorkAuthor(key=key, label=label, source=source))
+    else:
+        for author in record.authors:
+            authors.append(
+                WorkAuthor(
+                    key=None,
+                    label=author.display_name,
+                    source="DIMEV",
+                )
+            )
+
+    return EntityDetails(
+        source_id=f"DIMEV:{record.record_id}",
+        label=record.title,
+        source_name="DIMEV",
+        source_ref=record.record_url,
+        label_lang="enm",
+        variants=tuple(NameVariant(value) for value in record.title_variants),
+        links=dedupe_links(tuple(links)),
+        main_lang="enm",
+        main_lang_label="Middle English",
+        incipit=record.first_lines[0] if record.first_lines else None,
+        incipit_lang="enm" if record.first_lines else None,
+        extra_incipits=record.first_lines[1:],
+        explicits=record.last_lines,
+        subjects=record.subjects,
+        authors=tuple(authors),
+    )
+
+
 def build_person_snippet(key: str, details: EntityDetails) -> str:
     lines = [f'            <person xml:id="{key}">']
     lines.append(
-        f"               <persName{format_attrs(source='Wikidata', subtype=details.display_subtype, type='display')}>{escape(display_label_for_person(details))}</persName>"
+        f"               <persName{format_attrs(source=details.source_name, subtype=details.display_subtype, type='display')}>{escape(display_label_for_person(details))}</persName>"
     )
     for variant in details.variants:
         lines.append(
-            f"               <persName{format_attrs(source='Wikidata', type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</persName>"
+            f"               <persName{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</persName>"
         )
     if details.birth:
         lines.append(
-            f"               <birth{format_attrs(cert='medium' if details.birth_uncertain else None, source='Wikidata', when=details.birth)}/>"
+            f"               <birth{format_attrs(cert='medium' if details.birth_uncertain else None, source=details.source_name, when=details.birth)}/>"
         )
     if details.death:
         lines.append(
-            f"               <death{format_attrs(cert='medium' if details.death_uncertain else None, source='Wikidata', when=details.death)}/>"
+            f"               <death{format_attrs(cert='medium' if details.death_uncertain else None, source=details.source_name, when=details.death)}/>"
         )
     if details.floruit and (
         details.floruit.from_value or details.floruit.to_value
@@ -2325,27 +2511,27 @@ def build_person_snippet(key: str, details: EntityDetails) -> str:
         lines.append(f"               <floruit {' '.join(parts)}/>")
     if details.sex:
         lines.append(
-            f"               <sex{format_attrs(source='Wikidata')}>{details.sex}</sex>"
+            f"               <sex{format_attrs(source=details.source_name)}>{details.sex}</sex>"
         )
     for affiliation in details.affiliations:
         lines.append(
-            f"               <affiliation{format_attrs(type=affiliation.relation_type)}><orgName{format_attrs(key=affiliation.key, source='Wikidata')}>{escape(affiliation.label)}</orgName></affiliation>"
+            f"               <affiliation{format_attrs(type=affiliation.relation_type)}><orgName{format_attrs(key=affiliation.key, source=details.source_name)}>{escape(affiliation.label)}</orgName></affiliation>"
         )
     for education in details.educations:
         lines.append(
-            f"               <education><orgName{format_attrs(key=education.key, source='Wikidata')}>{escape(education.label)}</orgName></education>"
+            f"               <education><orgName{format_attrs(key=education.key, source=details.source_name)}>{escape(education.label)}</orgName></education>"
         )
     for nationality in details.nationalities:
         lines.append(
-            f"               <nationality{format_attrs(key=nationality.key, source='Wikidata')}>{escape(nationality.label)}</nationality>"
+            f"               <nationality{format_attrs(key=nationality.key, source=details.source_name)}>{escape(nationality.label)}</nationality>"
         )
     for residence in details.residences:
         lines.append(
-            f"               <residence><placeName{format_attrs(key=residence.key, source='Wikidata')}>{escape(residence.label)}</placeName></residence>"
+            f"               <residence><placeName{format_attrs(key=residence.key, source=details.source_name)}>{escape(residence.label)}</placeName></residence>"
         )
     for occupation in details.occupations:
         lines.append(
-            f"               <occupation{format_attrs(source='Wikidata', **{'xml:lang': occupation.lang})}>{escape(occupation.value)}</occupation>"
+            f"               <occupation{format_attrs(source=details.source_name, **{'xml:lang': occupation.lang})}>{escape(occupation.value)}</occupation>"
         )
     lines.extend(links_note_xml(details.links, "               "))
     lines.append("            </person>")
@@ -2357,15 +2543,15 @@ def build_place_snippet(key: str, details: EntityDetails) -> str:
         f"            <place{format_attrs(type=details.place_type, **{'xml:id': key})}>"
     ]
     lines.append(
-        f"               <placeName{format_attrs(source='Wikidata', type='index')}>{escape(details.label)}</placeName>"
+        f"               <placeName{format_attrs(source=details.source_name, type='index')}>{escape(details.label)}</placeName>"
     )
     for variant in details.variants:
         lines.append(
-            f"               <placeName{format_attrs(source='Wikidata', type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</placeName>"
+            f"               <placeName{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</placeName>"
         )
     if details.coordinates is not None:
         lines.append(
-            f'               <location source="https://www.wikidata.org/entity/{details.qid}">'
+            f'               <location source="{escape(details.source_ref or f"https://www.wikidata.org/entity/{details.source_id}")}">'
         )
         lines.append(
             f"                  <geo>{details.coordinates.latitude},{details.coordinates.longitude}</geo>"
@@ -2379,11 +2565,11 @@ def build_place_snippet(key: str, details: EntityDetails) -> str:
 def build_org_snippet(key: str, details: EntityDetails) -> str:
     lines = [f'            <org xml:id="{key}">']
     lines.append(
-        f"               <orgName{format_attrs(source='Wikidata', type='display')}>{escape(details.label)}</orgName>"
+        f"               <orgName{format_attrs(source=details.source_name, type='display')}>{escape(details.label)}</orgName>"
     )
     for variant in details.variants:
         lines.append(
-            f"               <orgName{format_attrs(source='Wikidata', type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</orgName>"
+            f"               <orgName{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</orgName>"
         )
     lines.extend(links_note_xml(details.links, "               "))
     lines.append("            </org>")
@@ -2406,22 +2592,44 @@ def build_work_snippet(key: str, details: EntityDetails) -> str:
     if details.main_lang_label:
         uniform_parts.append(f" [{details.main_lang_label}]")
     lines.append(
-        f"               <title{format_attrs(source='Wikidata', type='uniform')}>{escape(''.join(uniform_parts))}</title>"
+        f"               <title{format_attrs(source=details.source_name, type='uniform')}>{escape(''.join(uniform_parts))}</title>"
+    )
+    lines.append(
+        f"               <title{format_attrs(source=details.source_name, type='primary')}>{escape(details.label)}</title>"
     )
     for variant in details.variants:
         lines.append(
-            f"               <title{format_attrs(source='Wikidata', type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</title>"
+            f"               <title{format_attrs(source=details.source_name, type='variant', **{'xml:lang': variant.lang})}>{escape(variant.value)}</title>"
         )
     lines.append(
         f'               <textLang mainLang="{escape(details.main_lang or "und")}"/>'
     )
     if details.incipit:
         lines.append(
-            f"               <incipit{format_attrs(source='Wikidata', **{'xml:lang': details.incipit_lang})}>{escape(details.incipit)}</incipit>"
+            f"               <incipit{format_attrs(source=details.source_name, **{'xml:lang': details.incipit_lang})}>{format_text_with_lbs(details.incipit)}</incipit>"
+        )
+    for incipit in details.extra_incipits:
+        lines.append(
+            f"               <incipit{format_attrs(source=details.source_name, **{'xml:lang': details.incipit_lang})}>{format_text_with_lbs(incipit)}</incipit>"
+        )
+    for explicit in details.explicits:
+        lines.append(
+            f"               <explicit{format_attrs(source=details.source_name, **{'xml:lang': details.incipit_lang})}>{format_text_with_lbs(explicit)}</explicit>"
+        )
+    for subject in details.subjects:
+        lines.append(
+            f"               <term{format_attrs(source=details.source_name)}>{escape(subject)}</term>"
         )
     lines.extend(links_note_xml(details.links, "               "))
     lines.append("            </bibl>")
     return "\n".join(lines)
+
+
+def format_text_with_lbs(text: str) -> str:
+    """Escape lineated text content while preserving ``<lb/>`` boundaries."""
+
+    parts = [escape(part) for part in text.split("\n")]
+    return "<lb/>".join(parts)
 
 
 def route_entity(
@@ -2497,8 +2705,8 @@ def infer_entity_type_from_entity(
 
 def parse_add_ref_spec(
     spec: str, *, forced_entity_type: EntityType | None = None
-) -> tuple[EntityType | None, str]:
-    """Parse one ``authorities add`` ref spec into an optional type and QID."""
+) -> AddRefTarget:
+    """Parse one ``authorities add`` ref spec into an optional type and source ID."""
 
     raw = spec.strip()
     if not raw:
@@ -2516,10 +2724,36 @@ def parse_add_ref_spec(
         if maybe_entity is not None:
             entity_type = maybe_entity
             ref = maybe_ref.strip()
+    if ref.lower().startswith("dimev:"):
+        identifier = ref.split(":", 1)[1].strip()
+        if not identifier.isdigit():
+            raise ValueError(f"Could not parse a DIMEV record ID from '{spec}'")
+        if entity_type not in {None, EntityType.WORK}:
+            raise ValueError("DIMEV refs can only be used for work entries")
+        return AddRefTarget(
+            entity_type=EntityType.WORK,
+            source="dimev",
+            identifier=identifier,
+        )
+    dimev_id = extract_dimev_id(ref)
+    if dimev_id is not None:
+        if entity_type not in {None, EntityType.WORK}:
+            raise ValueError("DIMEV refs can only be used for work entries")
+        return AddRefTarget(
+            entity_type=EntityType.WORK,
+            source="dimev",
+            identifier=dimev_id,
+        )
     qid = extract_qid(ref)
     if qid is None:
-        raise ValueError(f"Could not parse a Wikidata QID from '{spec}'")
-    return entity_type, qid
+        raise ValueError(
+            f"Could not parse a supported source ref from '{spec}'"
+        )
+    return AddRefTarget(
+        entity_type=entity_type,
+        source="wikidata",
+        identifier=qid,
+    )
 
 
 def assign_key_for_details(
@@ -2899,7 +3133,7 @@ def run_regenerate(args: argparse.Namespace, client: WikidataClient) -> int:
             created_related_messages.append(
                 (
                     str(target_path),
-                    f"created related {entry.key} <- {entry.qid} ({entry.entity_type}: {entry.label}) for {key}",
+                    f"created related {entry.key} <- {entry.source_id} ({entry.entity_type}: {entry.label}) for {key}",
                 )
             )
     for path, message in regenerated:
@@ -2995,12 +3229,12 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
     author_match_warnings: list[dict[str, str]] = []
     for candidate in candidates:
         fallback_by_target.setdefault(
-            (candidate.entity_type, candidate.qid),
-            candidate.text or candidate.qid,
+            (candidate.entity_type, candidate.source_id),
+            candidate.text or candidate.source_id,
         )
         if candidate.entity_type == "work" and candidate.context_author_key:
             preferred_author_context_by_work_qid.setdefault(
-                candidate.qid,
+                candidate.source_id,
                 (candidate.context_author_key, candidate.context_author_text),
             )
 
@@ -3028,7 +3262,15 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
                     or equivalent_key
                 )
             return equivalent_key, label
-        key = ensure_entry(entity_type, qid, fallback_text)
+        key = ensure_entry(
+            AddRefTarget(
+                entity_type=entity_type,
+                source="wikidata",
+                identifier=qid,
+            ),
+            entity_type,
+            fallback_text,
+        )
         if entity_type == EntityType.PLACE:
             label = (
                 place_display_map.get(key)
@@ -3114,7 +3356,15 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
             )
             return existing_key, label, None
 
-        key = ensure_entry(EntityType.PERSON, author_qid, author_qid)
+        key = ensure_entry(
+            AddRefTarget(
+                entity_type=EntityType.PERSON,
+                source="wikidata",
+                identifier=author_qid,
+            ),
+            EntityType.PERSON,
+            author_qid,
+        )
         if key in person_display_map:
             return key, person_display_map[key], None
         if key in planned_person_display_map:
@@ -3185,7 +3435,7 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
 
         key_map[target] = new_key
         planned[target] = PlannedEntry(
-            qid=qid,
+            source_id=qid,
             key=new_key,
             entity_type=entity_type,
             label=display_label_for_person(details)
@@ -3236,7 +3486,7 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
         "new_entries": [
             {
                 "entity_type": entry.entity_type,
-                "qid": entry.qid,
+                "source_id": entry.source_id,
                 "key": entry.key,
                 "label": entry.label,
                 "list_type": entry.list_spec.list_type,
@@ -3255,8 +3505,8 @@ def run_enrich(args: argparse.Namespace, client: WikidataClient) -> int:
                 "file": str(c.file_path),
                 "element": c.element_name,
                 "entity_type": c.entity_type,
-                "qid": c.qid,
-                "assigned_key": key_map.get((c.entity_type, c.qid)),
+                "source_id": c.source_id,
+                "assigned_key": key_map.get((c.entity_type, c.source_id)),
             }
             for c in candidates
         ],
@@ -3288,6 +3538,7 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
             persons=args.persons, places=args.places, works=args.works
         )
     )
+    dimev_client = DimevClient(no_fetch=client.no_fetch)
     apply_changes = not getattr(args, "dry_run", False)
 
     for path in [args.persons, args.places, args.works]:
@@ -3302,15 +3553,24 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
         else None
     )
     existing_maps: dict[EntityType, dict[str, str]] = {
-        EntityType.PERSON: repository.qid_map(EntityType.PERSON),
-        EntityType.PLACE: repository.qid_map(EntityType.PLACE),
-        EntityType.ORG: repository.qid_map(EntityType.ORG),
-        EntityType.WORK: repository.qid_map(EntityType.WORK),
+        EntityType.PERSON: read_existing_source_map(
+            repository.paths.persons, EntityType.PERSON
+        ),
+        EntityType.PLACE: read_existing_source_map(
+            repository.paths.places, EntityType.PLACE
+        ),
+        EntityType.ORG: read_existing_source_map(
+            repository.paths.places, EntityType.ORG
+        ),
+        EntityType.WORK: read_existing_source_map(
+            repository.paths.works, EntityType.WORK
+        ),
     }
     person_display_map = repository.display_map(EntityType.PERSON)
     place_display_map = repository.display_map(EntityType.PLACE)
     org_display_map = repository.display_map(EntityType.ORG)
     person_authority_records = read_person_authority_records(args.persons)
+    person_name_index = build_person_name_index(person_authority_records)
     used_ids: dict[str, set[int]] = repository.used_ids()
     min_ids = {
         "person": args.person_min_id,
@@ -3324,22 +3584,27 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
     planned_person_display_map: dict[str, str] = {}
     planned_place_display_map: dict[str, str] = {}
     planned_org_display_map: dict[str, str] = {}
-    requested_targets: list[tuple[EntityType, str, str]] = []
+    requested_targets: list[tuple[AddRefTarget, EntityType, str]] = []
     active_work_context: dict[str, str] = {}
 
     for spec in args.refs:
-        spec_entity_type, qid = parse_add_ref_spec(
+        target = parse_add_ref_spec(
             spec, forced_entity_type=forced_entity_type
         )
-        entity_type = spec_entity_type or infer_entity_type_from_entity(
-            qid, client
-        )
+        entity_type = target.entity_type
+        if entity_type is None:
+            entity_type = infer_entity_type_from_entity(target.identifier, client)
         if entity_type is None:
             raise ValueError(
-                f"Could not infer an authority type for {qid}. Use --as or a typed spec such as place:{qid}."
+                f"Could not infer an authority type for {target.identifier}. Use --as or a typed spec such as place:{target.identifier}."
             )
-        fallback_text = preferred_label(client.get_entity(qid), qid).value
-        requested_targets.append((entity_type, qid, fallback_text))
+        if target.source == "wikidata":
+            fallback_text = preferred_label(
+                client.get_entity(target.identifier), target.identifier
+            ).value
+        else:
+            fallback_text = target.display_id
+        requested_targets.append((target, entity_type, fallback_text))
 
     def ensure_related_for_person(
         entity_type: EntityType, qid: str, fallback_text: str
@@ -3363,7 +3628,15 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
                     or equivalent_key
                 )
             return equivalent_key, label
-        key = ensure_entry(entity_type, qid, fallback_text)
+        key = ensure_entry(
+            AddRefTarget(
+                entity_type=entity_type,
+                source="wikidata",
+                identifier=qid,
+            ),
+            entity_type,
+            fallback_text,
+        )
         if entity_type == EntityType.PLACE:
             label = (
                 place_display_map.get(key)
@@ -3400,7 +3673,9 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
             )
             return preferred_key, label, None
 
-        existing_key = existing_maps[EntityType.PERSON].get(author_qid)
+        existing_key = existing_maps[EntityType.PERSON].get(
+            f"wikidata:{author_qid}"
+        )
         if existing_key:
             label = (
                 person_display_map.get(existing_key)
@@ -3413,7 +3688,15 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
             )
             return existing_key, label, None
 
-        key = ensure_entry(EntityType.PERSON, author_qid, author_qid)
+        key = ensure_entry(
+            AddRefTarget(
+                entity_type=EntityType.PERSON,
+                source="wikidata",
+                identifier=author_qid,
+            ),
+            EntityType.PERSON,
+            author_qid,
+        )
         if key in person_display_map:
             return key, person_display_map[key], None
         if key in planned_person_display_map:
@@ -3426,33 +3709,66 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
             "Wikidata",
         )
 
+    def resolve_dimev_person(
+        author: DimevAuthor,
+    ) -> tuple[str | None, str, str | None]:
+        for candidate in author.name_variants:
+            match_key = normalize_name_for_match(candidate)
+            existing_key = person_name_index.get(match_key)
+            if existing_key:
+                label = (
+                    person_display_map.get(existing_key)
+                    or person_authority_records.get(
+                        existing_key, PersonAuthorityRecord(existing_key)
+                    ).display_label
+                    or candidate
+                )
+                return existing_key, label, None
+        return None, author.display_name, "DIMEV"
+
     def ensure_entry(
-        entity_type: EntityType, qid: str, fallback_text: str
+        target_ref: AddRefTarget, entity_type: EntityType, fallback_text: str
     ) -> str:
-        target = (entity_type, qid)
+        target = (entity_type, target_ref.lookup_key)
         if target in key_map:
             return key_map[target]
 
-        existing_key = existing_maps[entity_type].get(qid)
+        existing_key = existing_maps[entity_type].get(target_ref.lookup_key)
         if existing_key:
             key_map[target] = existing_key
             return existing_key
 
-        if entity_type == EntityType.PERSON:
+        if target_ref.source == "wikidata" and entity_type == EntityType.PERSON:
             details = build_person_details(
-                qid, fallback_text or qid, client, ensure_related_for_person
+                target_ref.identifier,
+                fallback_text or target_ref.identifier,
+                client,
+                ensure_related_for_person,
             )
-        elif entity_type == EntityType.PLACE:
-            details = build_place_details(qid, fallback_text or qid, client)
-        elif entity_type == EntityType.ORG:
-            details = build_org_details(qid, fallback_text or qid, client)
-        else:
-            active_work_context["qid"] = qid
-            active_work_context["title"] = fallback_text or qid
+        elif target_ref.source == "wikidata" and entity_type == EntityType.PLACE:
+            details = build_place_details(
+                target_ref.identifier, fallback_text or target_ref.identifier, client
+            )
+        elif target_ref.source == "wikidata" and entity_type == EntityType.ORG:
+            details = build_org_details(
+                target_ref.identifier, fallback_text or target_ref.identifier, client
+            )
+        elif target_ref.source == "wikidata":
+            active_work_context["qid"] = target_ref.identifier
+            active_work_context["title"] = fallback_text or target_ref.identifier
             details = build_work_details(
-                qid, fallback_text or qid, client, ensure_person_for_work
+                target_ref.identifier,
+                fallback_text or target_ref.identifier,
+                client,
+                ensure_person_for_work,
             )
             active_work_context.clear()
+        else:
+            details = build_dimev_work_details(
+                target_ref.identifier,
+                dimev_client,
+                resolve_dimev_person,
+            )
 
         list_spec = route_entity(details, entity_type)
         new_key = assign_key_for_details(
@@ -3475,7 +3791,7 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
 
         key_map[target] = new_key
         planned[target] = PlannedEntry(
-            qid=qid,
+            source_id=details.source_id,
             key=new_key,
             entity_type=entity_type,
             label=display_label_for_person(details)
@@ -3487,8 +3803,8 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
         )
         return new_key
 
-    for entity_type, qid, fallback_text in requested_targets:
-        ensure_entry(entity_type, qid, fallback_text)
+    for target_ref, entity_type, fallback_text in requested_targets:
+        ensure_entry(target_ref, entity_type, fallback_text)
 
     entries_by_list: dict[tuple[str, str, str, str], list[PlannedEntry]] = {}
     for (_, _), entry in sorted(planned.items()):
@@ -3516,7 +3832,7 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
         "new_entries": [
             {
                 "entity_type": entry.entity_type,
-                "qid": entry.qid,
+                "source_id": entry.source_id,
                 "key": entry.key,
                 "label": entry.label,
                 "list_type": entry.list_spec.list_type,
@@ -3549,7 +3865,7 @@ def run_add(args: argparse.Namespace, client: WikidataClient) -> int:
         )
         action = "added" if apply_changes else "planned"
         print(
-            f"{target_path}: {action} {entry.key} <- {entry.qid} ({entry.entity_type})"
+            f"{target_path}: {action} {entry.key} <- {entry.source_id} ({entry.entity_type})"
         )
 
     print(f"Report written: {args.report}")

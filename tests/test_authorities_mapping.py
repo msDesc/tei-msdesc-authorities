@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from lxml import etree
 import pytest
+from tei_msdesc_authorities.authorities import dimev as DIMEV_MODULE
 
 
 @pytest.mark.parametrize(
@@ -8,7 +12,7 @@ import pytest
     [
         (
             {
-                "qid": "Q1",
+                "source_id": "Q1",
                 "label": "Price, Gregory",
                 "birth": "1535-08-06",
                 "death": "1600-03-19",
@@ -17,7 +21,7 @@ import pytest
         ),
         (
             {
-                "qid": "Q2",
+                "source_id": "Q2",
                 "label": "Carne, Sir Edward",
                 "display_subtype": "surnameFirst",
                 "honorific_prefix": "Sir",
@@ -111,7 +115,7 @@ def test_build_person_details_reorders_honorific_surname_first_name(
 
 def test_build_person_snippet_sets_cert_for_approximate_dates(module) -> None:
     details = module.EntityDetails(
-        qid="Q2",
+        source_id="Q2",
         label="Carne, Sir Edward",
         display_subtype="surnameFirst",
         birth="1496",
@@ -124,6 +128,58 @@ def test_build_person_snippet_sets_cert_for_approximate_dates(module) -> None:
     assert '<birth cert="medium" source="Wikidata" when="1496"/>' in snippet
     assert '<death source="Wikidata" when="1561"/>' in snippet
     assert "Carne, Sir Edward, 1496?–1561" in snippet
+
+
+def test_read_person_authority_records_collects_variant_labels(
+    module, tmp_path: Path
+) -> None:
+    authority = tmp_path / "persons.xml"
+    authority.write_text(
+        """<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <text>
+    <body>
+      <listPerson>
+        <person xml:id="person_1">
+          <persName type="display">Chaucer, Geoffrey, –1400</persName>
+          <persName type="variant">Geoffrey Chaucer</persName>
+          <persName type="variant">Geffrey Chaucer</persName>
+        </person>
+      </listPerson>
+    </body>
+  </text>
+</TEI>""",
+        encoding="utf-8",
+    )
+
+    records = module.read_person_authority_records(authority)
+
+    assert records["person_1"].display_label == "Chaucer, Geoffrey, –1400"
+    assert records["person_1"].variant_labels == (
+        "Geoffrey Chaucer",
+        "Geffrey Chaucer",
+    )
+
+
+def test_build_person_name_index_includes_unambiguous_variant_labels(
+    module,
+) -> None:
+    records = {
+        "person_1": module.PersonAuthorityRecord(
+            key="person_1",
+            display_label="Chaucer, Geoffrey, –1400",
+            variant_labels=("Geffrey Chaucer",),
+        ),
+        "person_2": module.PersonAuthorityRecord(
+            key="person_2",
+            display_label="Gower, John, –1408",
+        ),
+    }
+
+    index = module.build_person_name_index(records)
+
+    assert index["geoffrey chaucer"] == "person_1"
+    assert index["chaucer geoffrey"] == "person_1"
+    assert index["geffrey chaucer"] == "person_1"
 
 
 def test_build_place_details_rounds_coordinates_and_sets_country_type(
@@ -169,7 +225,7 @@ def test_build_place_details_rounds_coordinates_and_sets_country_type(
 
 def test_build_place_snippet_emits_type_and_rounded_geo(module) -> None:
     details = module.EntityDetails(
-        qid="QPLACE",
+        source_id="QPLACE",
         label="Kingdom of Sicily",
         place_type="country",
         coordinates=module.CoordinatePoint(
@@ -185,7 +241,7 @@ def test_build_place_snippet_emits_type_and_rounded_geo(module) -> None:
 
 def test_route_entity_prefers_tgn_over_geonames_for_places(module) -> None:
     details = module.EntityDetails(
-        qid="Q145",
+        source_id="Q145",
         label="United Kingdom",
         external_ids=module.ExternalAuthorityIds(
             geonames="2635167",
@@ -203,7 +259,7 @@ def test_assign_key_for_details_prefers_tgn_over_geonames_for_places(
     module,
 ) -> None:
     details = module.EntityDetails(
-        qid="Q145",
+        source_id="Q145",
         label="United Kingdom",
         external_ids=module.ExternalAuthorityIds(
             geonames="2635167",
@@ -219,6 +275,297 @@ def test_assign_key_for_details_prefers_tgn_over_geonames_for_places(
     )
 
     assert key == "place_7008591"
+
+
+def test_parse_add_ref_spec_accepts_dimev_url(module) -> None:
+    target = module.parse_add_ref_spec(
+        "https://www.dimev.net/record.php?recID=2613"
+    )
+
+    assert target.entity_type == module.EntityType.WORK
+    assert target.source == "dimev"
+    assert target.identifier == "2613"
+    assert target.display_id == "DIMEV:2613"
+
+
+def test_parse_add_ref_spec_accepts_legacy_dwm27_dimev_url(module) -> None:
+    target = module.parse_add_ref_spec(
+        "https://dwm27.net/dimev/record.php?recID=2983"
+    )
+
+    assert target.entity_type == module.EntityType.WORK
+    assert target.source == "dimev"
+    assert target.identifier == "2983"
+
+
+def test_parse_add_ref_spec_rejects_non_work_dimev_ref(module) -> None:
+    with pytest.raises(
+        ValueError, match="DIMEV refs can only be used for work entries"
+    ):
+        module.parse_add_ref_spec("place:dimev:2613")
+
+
+def test_build_dimev_work_details_uses_record_metadata(module) -> None:
+    client = module.DimevClient(no_fetch=False)
+    client._record_cache["2613"] = module.DimevRecord(
+        record_id="2613",
+        title="In the name of the blessed Trinity",
+        title_variants=(),
+        authors=(),
+        first_lines=(
+            "In the name of the blessid trinyte The fader þe sone and þe holi goost",
+        ),
+        last_lines=(),
+        subjects=("prayers", "domestic life"),
+        imev_id="1557",
+        nimev_id="1557",
+    )
+
+    details = module.build_dimev_work_details("2613", client)
+
+    assert details.source_id == "DIMEV:2613"
+    assert details.label == "In the name of the blessed Trinity"
+    assert details.source_name == "DIMEV"
+    assert details.source_ref == "https://www.dimev.net/record.php?recID=2613"
+    assert details.label_lang == "enm"
+    assert details.main_lang == "enm"
+    assert details.main_lang_label == "Middle English"
+    assert details.incipit.startswith("In the name of the blessid trinyte")
+    assert details.incipit_lang == "enm"
+    assert details.subjects == ("prayers", "domestic life")
+    assert [(link.title, link.target) for link in details.links] == [
+        (
+            "Digital Index of Middle English Verse",
+            "https://www.dimev.net/record.php?recID=2613",
+        ),
+        (
+            "Index of Middle English Verse",
+            "https://www.dimev.net/Results.php?imev=1557",
+        ),
+        (
+            "New Index of Middle English Verse",
+            "https://www.dimev.net/Results.php?nimev=1557",
+        ),
+    ]
+
+
+def test_build_dimev_work_details_prefers_title_and_matches_author(module) -> None:
+    client = module.DimevClient(no_fetch=False)
+    client._record_cache["2983"] = module.DimevRecord(
+        record_id="2983",
+        title="A hymn to St. Katharine of Sinai",
+        title_variants=("Katherine the courteous of all that I know",),
+        authors=(
+            module.DimevAuthor(first="Richard", last="Spaldyng"),
+        ),
+        first_lines=("Kateryne þe curteys of all þat I know",),
+        last_lines=(),
+        subjects=("hymns", "saints"),
+        imev_id="1813",
+        nimev_id="1813",
+    )
+
+    details = module.build_dimev_work_details(
+        "2983",
+        client,
+        lambda author: ("person_42", "Spaldyng, Richard", None),
+    )
+
+    assert details.label == "A hymn to St. Katharine of Sinai"
+    assert [(variant.value, variant.lang) for variant in details.variants] == [
+        ("Katherine the courteous of all that I know", None)
+    ]
+    assert [(author.key, author.label, author.source) for author in details.authors] == [
+        ("person_42", "Spaldyng, Richard", None)
+    ]
+
+
+def test_parse_dimev_record_reads_repository_xml(module) -> None:
+    records = etree.fromstring(
+        """<records>
+        <record xml:id="record-2613">
+            <name>In the name of the blessed Trinity</name>
+            <repertories>
+                <repertory key="Brown1943">1557</repertory>
+                <repertory key="NIMEV">1557</repertory>
+            </repertories>
+            <witnesses>
+                <witness xml:id="wit-2613-1">
+                    <firstLines>In the name of þe blessid trinyte<lb/>The fader þe sone</firstLines>
+                </witness>
+            </witnesses>
+        </record>
+    </records>"""
+    )
+
+    record = module.parse_dimev_record(records, "2613")
+
+    assert record is not None
+    assert record.record_id == "2613"
+    assert record.title == "In the name of the blessed Trinity"
+    assert record.imev_id == "1557"
+    assert record.nimev_id == "1557"
+    assert record.first_lines == ("In the name of þe blessid trinyte\nThe fader þe sone",)
+
+
+def test_parse_dimev_record_reads_titles_and_authors(module) -> None:
+    records = etree.fromstring(
+        """<records>
+        <record xml:id="record-2983">
+            <name>Katherine the courteous of all that I know</name>
+            <titles>
+                <title>A hymn to St. Katharine of Sinai</title>
+            </titles>
+            <authors>
+                <author>
+                    <last>Spaldyng</last>
+                    <first>Richard</first>
+                </author>
+            </authors>
+        </record>
+    </records>"""
+    )
+
+    record = module.parse_dimev_record(records, "2983")
+
+    assert record is not None
+    assert record.title == "A hymn to St. Katharine of Sinai"
+    assert record.title_variants == ("Katherine the courteous of all that I know",)
+    assert [author.display_name for author in record.authors] == [
+        "Spaldyng, Richard"
+    ]
+
+
+def test_parse_dimev_record_collects_all_first_and_last_lines_and_subjects(module) -> None:
+    records = etree.fromstring(
+        """<records>
+        <record xml:id="record-1">
+            <name>Title</name>
+            <subjects>
+                <subject>agriculture</subject>
+                <subject>household</subject>
+            </subjects>
+            <witnesses>
+                <witness xml:id="wit-1-1">
+                    <firstLines>Alpha<lb/>Beta…</firstLines>
+                    <lastLines>…Omega<lb/>Zeta</lastLines>
+                </witness>
+                <witness xml:id="wit-1-2">
+                    <firstLines>Gamma</firstLines>
+                    <lastLines>Delta...</lastLines>
+                </witness>
+            </witnesses>
+        </record>
+    </records>"""
+    )
+
+    record = module.parse_dimev_record(records, "1")
+
+    assert record is not None
+    assert record.first_lines == ("Alpha\nBeta", "Gamma")
+    assert record.last_lines == ("Omega\nZeta", "Delta")
+    assert record.subjects == ("agriculture", "household")
+
+
+def test_dimev_client_reuses_on_disk_cache_between_runs(tmp_path: Path) -> None:
+    payload = b"""<records>
+    <record xml:id="record-1">
+        <name>Cached title</name>
+    </record>
+</records>"""
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self) -> bytes:
+            return payload
+
+    original_urlopen = DIMEV_MODULE.urllib.request.urlopen
+    DIMEV_MODULE.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse()
+    try:
+        first_client = DIMEV_MODULE.DimevClient(
+            no_fetch=False,
+            cache_dir=tmp_path,
+        )
+        first_record = first_client.get_record("1")
+    finally:
+        DIMEV_MODULE.urllib.request.urlopen = original_urlopen
+
+    assert first_record is not None
+    assert first_record.title == "Cached title"
+    assert (tmp_path / "dimev-records.xml").exists()
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("network should not be used when cached XML exists")
+
+    DIMEV_MODULE.urllib.request.urlopen = fail_urlopen
+    try:
+        second_client = DIMEV_MODULE.DimevClient(
+            no_fetch=True,
+            cache_dir=tmp_path,
+        )
+        second_record = second_client.get_record("1")
+    finally:
+        DIMEV_MODULE.urllib.request.urlopen = original_urlopen
+
+    assert second_record is not None
+    assert second_record.title == "Cached title"
+
+
+def test_build_work_snippet_uses_dimev_source_name(module) -> None:
+    details = module.EntityDetails(
+        source_id="DIMEV:2613",
+        label="In the name of the blessed Trinity",
+        source_name="DIMEV",
+        source_ref="https://www.dimev.net/record.php?recID=2613",
+        links=(
+            module.LinkItem(
+                title="Digital Index of Middle English Verse",
+                target="https://www.dimev.net/record.php?recID=2613",
+            ),
+        ),
+        main_lang="enm",
+        main_lang_label="Middle English",
+        incipit="In the name of the blessid trinyte",
+        incipit_lang="enm",
+        extra_incipits=("The fader þe sone and þe holi goost",),
+        explicits=("Where on þow suffred þi passyon pyne",),
+        subjects=("prayers", "domestic life"),
+    )
+
+    snippet = module.build_work_snippet("work_1", details)
+
+    assert (
+        '<title source="DIMEV" type="primary">In the name of the blessed Trinity</title>'
+        in snippet
+    )
+    assert 'source="DIMEV" type="uniform"' in snippet
+    assert '<title>Digital Index of Middle English Verse</title>' in snippet
+    assert (
+        '<incipit source="DIMEV" xml:lang="enm">In the name of the blessid trinyte</incipit>'
+        in snippet
+    )
+    assert (
+        '<incipit source="DIMEV" xml:lang="enm">The fader þe sone and þe holi goost</incipit>'
+        in snippet
+    )
+    assert (
+        '<explicit source="DIMEV" xml:lang="enm">Where on þow suffred þi passyon pyne</explicit>'
+        in snippet
+    )
+    assert '<term source="DIMEV">prayers</term>' in snippet
+    assert '<term source="DIMEV">domestic life</term>' in snippet
+
+
+def test_format_text_with_lbs_preserves_breaks(module) -> None:
+    assert (
+        module.format_text_with_lbs("Alpha\nBeta & Gamma")
+        == "Alpha<lb/>Beta &amp; Gamma"
+    )
 
 
 def test_external_id_links_use_trusted_property_classes_only(
@@ -545,7 +892,7 @@ def test_build_person_snippet_sets_low_cert_for_non_year_floruit(
     module, floruit, expected: str
 ) -> None:
     details = module.EntityDetails(
-        qid="Q3",
+        source_id="Q3",
         label="Example Person",
         floruit=floruit(module),
     )
@@ -651,7 +998,7 @@ def test_build_person_snippet_emits_keyed_org_and_place_relations(
     module,
 ) -> None:
     details = module.EntityDetails(
-        qid="QPERSON",
+        source_id="QPERSON",
         label="Example, John",
         affiliations=(
             module.LinkedAuthorityRef(

@@ -63,14 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_parser = subparsers.add_parser(
         "add",
-        help="Add authority entries directly from Wikidata IDs or URLs.",
+        help="Add authority entries directly from supported external source IDs or URLs.",
     )
     add_common_authority_args(add_parser)
     add_min_id_args(add_parser)
     add_parser.add_argument(
         "refs",
         nargs="+",
-        help="One or more Wikidata QIDs/URLs, optionally prefixed with a type such as place:Q145.",
+        help="One or more source refs, such as Q145, https://www.wikidata.org/entity/Q21, work:https://www.dimev.net/record.php?recID=2613, or dimev:2613.",
     )
     add_parser.add_argument(
         "--as",

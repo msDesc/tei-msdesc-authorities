@@ -199,7 +199,7 @@ class Candidate:
     element_name: ElementName
     entity_type: EntityType
     ref: str
-    qid: str
+    source_id: str
     text: str
     context_author_key: str | None = None
     context_author_text: str | None = None
@@ -225,7 +225,7 @@ class NameVariant:
 class WorkAuthor:
     """Resolved author information for a generated work authority record."""
 
-    key: str
+    key: str | None
     label: str
     source: str | None = None
 
@@ -334,8 +334,10 @@ class ClaimStatement:
 class EntityDetails:
     """Normalized external-source data ready for TEI serialization."""
 
-    qid: str
+    source_id: str
     label: str
+    source_name: str = "Wikidata"
+    source_ref: str | None = None
     label_lang: str | None = None
     display_subtype: str | None = None
     honorific_prefix: str | None = None
@@ -353,6 +355,9 @@ class EntityDetails:
     main_lang_label: str | None = None
     incipit: str | None = None
     incipit_lang: str | None = None
+    extra_incipits: tuple[str, ...] = ()
+    explicits: tuple[str, ...] = ()
+    subjects: tuple[str, ...] = ()
     authors: tuple[WorkAuthor, ...] = ()
     affiliations: tuple[LinkedAuthorityRef, ...] = ()
     educations: tuple[LinkedAuthorityRef, ...] = ()
@@ -366,7 +371,7 @@ class EntityDetails:
 class PlannedEntry:
     """A prepared authority record that has not yet been inserted into XML."""
 
-    qid: str
+    source_id: str
     key: str
     entity_type: EntityType
     label: str
@@ -381,6 +386,7 @@ class PersonAuthorityRecord:
 
     key: str
     display_label: str | None = None
+    variant_labels: tuple[str, ...] = ()
     wikidata_qids: frozenset[str] = frozenset()
     viaf_ids: frozenset[str] = frozenset()
 
