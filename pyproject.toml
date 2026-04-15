@@ -26,7 +26,7 @@ authorities = "tei_msdesc_authorities.authorities.cli:main"
 authority-identifiers = "tei_msdesc_authorities.authorities.checker:main"
 
 [dependency-groups]
-dev = ["lxml-stubs>=0.5.1", "pytest>=8.4.0"]
+dev = ["lxml-stubs>=0.5.1", "pytest>=9.0.3"]
 
 [tool.setuptools.package-dir]
 "" = "src"
